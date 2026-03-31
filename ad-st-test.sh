@@ -16,6 +16,18 @@ CYAN=$'\e[1;36m'
 GREEN=$'\e[1;32m'
 YELLOW=$'\e[1;33m'
 RED=$'\e[1;31m'
+MAGENTA=$'\e[1;35m'
+SOFT_ROSE=$'\e[38;5;217m'
+SOFT_PEACH=$'\e[38;5;223m'
+SOFT_GOLD=$'\e[38;5;222m'
+SOFT_MINT=$'\e[38;5;151m'
+SOFT_AQUA=$'\e[38;5;159m'
+SOFT_SKY=$'\e[38;5;117m'
+SOFT_LAVENDER=$'\e[38;5;183m'
+SOFT_LILAC=$'\e[38;5;177m'
+SOFT_CORAL=$'\e[38;5;216m'
+SOFT_PINK_RED=$'\e[38;5;211m'
+SOFT_SILVER=$'\e[38;5;251m'
 NC=$'\e[0m'
 
 ST_DIR="$HOME/SillyTavern"
@@ -35,6 +47,16 @@ LAB_CONFIG_FILE="$CONFIG_DIR/lab.conf"
 AGREEMENT_FILE="$CONFIG_DIR/.agreement_shown"
 
 GCLI_DIR="$HOME/gcli2api"
+SCRIPT_BASE_DIR="$(dirname "$SCRIPT_SELF_PATH")"
+GUGU_TRANSIT_EXT_REPO="https://github.com/canaan723/gugu-transit-manager.git"
+GUGU_TRANSIT_PLUGIN_REPO="https://github.com/canaan723/gugu-transit-manager-plugin.git"
+GUGU_TRANSIT_EXT_TARGET="$ST_DIR/public/scripts/extensions/third-party/gugu-transit-manager"
+GUGU_TRANSIT_PLUGIN_TARGET="$ST_DIR/plugins/gugu-transit-manager-plugin"
+GUGU_TRANSIT_EXT_DIR="$GUGU_TRANSIT_EXT_TARGET"
+GUGU_TRANSIT_PLUGIN_DIR="$GUGU_TRANSIT_PLUGIN_TARGET"
+LEGACY_GUGU_BOX_DIR="$SCRIPT_BASE_DIR/gugu-box"
+LEGACY_GUGU_TRANSIT_EXT_DIR="$LEGACY_GUGU_BOX_DIR/gugu-transit-manager"
+LEGACY_GUGU_TRANSIT_PLUGIN_DIR="$LEGACY_GUGU_BOX_DIR/gugu-transit-manager-plugin"
 
 readonly TOP_LEVEL_SYSTEM_FOLDERS=("data/_storage" "data/_cache" "data/_uploads" "data/_webpack")
 
@@ -57,7 +79,7 @@ GIT_LAST_LOG_FILE=""
 PKG_NONINTERACTIVE_NOTICE_SHOWN="false"
 
 fn_show_main_header() {
-    echo -e "    ${YELLOW}>>${GREEN} 清绝咕咕助手 v5.16test${NC}"
+    echo -e "    ${YELLOW}>>${GREEN} 清绝咕咕助手 v5.191${NC}"
     echo -e "       ${BOLD}\033[0;37m作者: 清绝 | 网址: blog.qjyg.de${NC}"
     echo -e "    ${RED}本脚本为免费工具，严禁用于商业倒卖！${NC}"
 }
@@ -107,6 +129,37 @@ fn_print_error_exit() {
     echo -e "\n${RED}✗ ${BOLD}$1${NC}\n${RED}流程已终止。${NC}" >&2
     fn_press_any_key
     exit 1
+}
+
+fn_get_display_width() {
+    local text="$1"
+    local non_ascii
+    non_ascii="$(printf '%s' "$text" | sed 's/[ -~]//g')"
+    echo $(( ${#text} + ${#non_ascii} ))
+}
+
+fn_pad_display_text() {
+    local text="$1"
+    local target_width="$2"
+    local display_width
+    display_width="$(fn_get_display_width "$text")"
+
+    if [ "$display_width" -ge "$target_width" ]; then
+        printf "%s" "$text"
+        return
+    fi
+
+    printf "%s%*s" "$text" $((target_width - display_width)) ""
+}
+
+fn_print_menu_cell() {
+    local color="$1"
+    local number="$2"
+    local label="$3"
+    local width="${4:-18}"
+    local padded_label
+    padded_label="$(fn_pad_display_text "$label" "$width")"
+    printf "  %b[%02d] %s%b" "$color" "$number" "$padded_label" "$NC"
 }
 
 fn_press_any_key() {
@@ -657,6 +710,31 @@ fn_convert_github_url_to_mirror_url() {
     fi
 
     echo ""
+    return 1
+}
+
+fn_get_git_url_by_route_host() {
+    local route_host="$1"
+    local github_url="$2"
+    local mirror_url mirror_host
+
+    if [[ -z "$route_host" || -z "$github_url" ]]; then
+        return 1
+    fi
+
+    if [[ "$route_host" == "github.com" ]]; then
+        echo "$github_url"
+        return 0
+    fi
+
+    for mirror_url in "${MIRROR_LIST[@]}"; do
+        mirror_host="$(echo "$mirror_url" | sed -E 's#^https?://([^/]+)/?.*$#\1#')"
+        if [[ "$mirror_host" == "$route_host" ]]; then
+            fn_convert_github_url_to_mirror_url "$mirror_url" "$github_url"
+            return 0
+        fi
+    done
+
     return 1
 }
 
@@ -2312,6 +2390,292 @@ fn_get_git_version() {
     fi
 }
 
+fn_resolve_real_path() {
+    local target="$1"
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        readlink -f "$target" 2>/dev/null
+    fi
+}
+
+fn_deploy_managed_repo() {
+    local project_name="$1"
+    local repo_url="$2"
+    local install_dir="$3"
+    local route_host="${4:-}"
+    local route_json route_url
+
+    if [ -e "$install_dir" ] && [ ! -d "$install_dir/.git" ]; then
+        fn_print_error "${project_name} 目录已存在，但不是 Git 仓库：$install_dir"
+        return 1
+    fi
+
+    if [[ -n "$route_host" ]]; then
+        if ! route_url="$(fn_get_git_url_by_route_host "$route_host" "$repo_url")"; then
+            fn_print_error "无法将线路 [$route_host] 应用于 ${project_name}。"
+            return 1
+        fi
+    else
+        if ! route_json="$(fn_resolve_download_route "部署 ${project_name}" "$repo_url")"; then
+            fn_print_error "未能为 ${project_name} 选定可用下载线路。"
+            return 1
+        fi
+        route_url="$(echo "$route_json" | cut -d'|' -f2)"
+    fi
+
+    if [ -d "$install_dir/.git" ]; then
+        (
+            cd "$install_dir" || exit 1
+            git remote set-url origin "$route_url"
+            if ! fn_run_git_with_progress "拉取 ${project_name} 更新" false git fetch --progress --all; then
+                exit 2
+            fi
+            git reset --hard "origin/$(git rev-parse --abbrev-ref HEAD)"
+        )
+        case $? in
+            0) return 0 ;;
+            2)
+                fn_print_error "${project_name} 拉取更新失败：$(fn_git_last_log_tail 8)"
+                return 1
+                ;;
+            *)
+                fn_print_error "${project_name} 更新失败，请检查目录权限或 Git 状态。"
+                return 1
+                ;;
+        esac
+    fi
+
+    mkdir -p "$(dirname "$install_dir")"
+    if ! fn_run_git_with_progress "克隆 ${project_name} 仓库" false git clone --progress "$route_url" "$install_dir"; then
+        fn_print_error "克隆 ${project_name} 失败：$(fn_git_last_log_tail 8)"
+        return 1
+    fi
+}
+
+fn_create_managed_link() {
+    local source_dir="$1"
+    local target_dir="$2"
+    local source_real target_real
+
+    source_real="$(fn_resolve_real_path "$source_dir")"
+    if [ -z "$source_real" ]; then
+        fn_print_error "无法创建链接，源目录不存在：$source_dir"
+        return 1
+    fi
+
+    if [ -e "$target_dir" ] || [ -L "$target_dir" ]; then
+        if [ -L "$target_dir" ]; then
+            target_real="$(fn_resolve_real_path "$target_dir")"
+            if [ "$target_real" = "$source_real" ]; then
+                return 0
+            fi
+            fn_print_error "目标位置已被其他链接占用：$target_dir"
+            return 1
+        fi
+        fn_print_error "目标位置已存在非托管目录，请先手动处理：$target_dir"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$target_dir")"
+    ln -s "$source_real" "$target_dir"
+}
+
+fn_migrate_legacy_gugu_transit_dir() {
+    local legacy_dir="$1"
+    local target_dir="$2"
+    local legacy_real target_real
+
+    [ -d "$legacy_dir" ] || return 0
+
+    if [ -L "$target_dir" ]; then
+        legacy_real="$(fn_resolve_real_path "$legacy_dir")"
+        target_real="$(fn_resolve_real_path "$target_dir")"
+        if [ -n "$legacy_real" ] && [ "$legacy_real" = "$target_real" ]; then
+            rm -f "$target_dir"
+            mv "$legacy_dir" "$target_dir"
+            return 0
+        fi
+        fn_print_error "检测到旧版链接，但目标不匹配：$target_dir"
+        return 1
+    fi
+
+    if [ -e "$target_dir" ]; then
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$target_dir")"
+    mv "$legacy_dir" "$target_dir"
+}
+
+fn_remove_managed_link() {
+    local source_dir="$1"
+    local target_dir="$2"
+    local source_real target_real
+
+    if [ ! -e "$target_dir" ] && [ ! -L "$target_dir" ]; then
+        return 0
+    fi
+
+    if [ ! -L "$target_dir" ]; then
+        fn_print_error "目标位置存在非托管目录，拒绝自动删除：$target_dir"
+        return 1
+    fi
+
+    source_real="$(fn_resolve_real_path "$source_dir")"
+    target_real="$(fn_resolve_real_path "$target_dir")"
+    if [ -n "$source_real" ] && [ "$target_real" != "$source_real" ]; then
+        fn_print_error "目标链接不属于当前托管项目，拒绝自动删除：$target_dir"
+        return 1
+    fi
+
+    rm -f "$target_dir"
+}
+
+fn_get_gugu_transit_status() {
+    local ext_ready=false
+    local plugin_ready=false
+
+    if [ -d "$GUGU_TRANSIT_EXT_DIR/.git" ]; then
+        ext_ready=true
+    fi
+
+    if [ -d "$GUGU_TRANSIT_PLUGIN_DIR/.git" ]; then
+        plugin_ready=true
+    fi
+
+    if $ext_ready && $plugin_ready; then
+        echo -e "${GREEN}已安装${NC}"
+        return
+    fi
+
+    if [ -d "$GUGU_TRANSIT_EXT_DIR" ] || [ -d "$GUGU_TRANSIT_PLUGIN_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_EXT_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_PLUGIN_DIR" ] || [ -L "$GUGU_TRANSIT_EXT_TARGET" ] || [ -L "$GUGU_TRANSIT_PLUGIN_TARGET" ]; then
+        echo -e "${YELLOW}安装不完整${NC}"
+        return
+    fi
+
+    echo -e "${RED}未安装${NC}"
+}
+
+fn_install_gugu_transit_manager() {
+    clear
+    fn_print_header "安装/更新咕咕助手 - 中转管理"
+    local selected_route route_host
+    local current_server_plugins
+
+    if [ ! -d "$ST_DIR" ]; then
+        fn_print_error "未检测到酒馆目录，请先完成首次部署。"
+        fn_press_any_key
+        return
+    fi
+
+    if ! fn_migrate_legacy_gugu_transit_dir "$LEGACY_GUGU_TRANSIT_EXT_DIR" "$GUGU_TRANSIT_EXT_DIR"; then
+        fn_press_any_key
+        return
+    fi
+
+    if ! fn_migrate_legacy_gugu_transit_dir "$LEGACY_GUGU_TRANSIT_PLUGIN_DIR" "$GUGU_TRANSIT_PLUGIN_DIR"; then
+        fn_press_any_key
+        return
+    fi
+
+    if ! selected_route="$(fn_resolve_download_route "部署 咕咕助手 - 中转管理" "$GUGU_TRANSIT_EXT_REPO")"; then
+        fn_print_error "未能为咕咕助手 - 中转管理选定可用下载线路。"
+        fn_press_any_key
+        return
+    fi
+    route_host="$(echo "$selected_route" | cut -d'|' -f1)"
+
+    if ! fn_deploy_managed_repo "前端扩展" "$GUGU_TRANSIT_EXT_REPO" "$GUGU_TRANSIT_EXT_DIR" "$route_host"; then
+        fn_press_any_key
+        return
+    fi
+
+    if ! fn_deploy_managed_repo "后端插件" "$GUGU_TRANSIT_PLUGIN_REPO" "$GUGU_TRANSIT_PLUGIN_DIR" "$route_host"; then
+        fn_press_any_key
+        return
+    fi
+
+    current_server_plugins="$(fn_get_st_config_value "enableServerPlugins")"
+    if [[ "$current_server_plugins" != "true" ]]; then
+        fn_update_st_config_value "enableServerPlugins" "true" >/dev/null 2>&1 || true
+        fn_print_warning "检测到酒馆后端插件原本未开启，已自动开启。"
+    fi
+
+    fn_print_success "咕咕助手 - 中转管理 已安装/更新完成。"
+    fn_print_warning "如酒馆正在运行，必须重启一次后再使用。"
+    fn_press_any_key
+}
+
+fn_uninstall_gugu_transit_manager() {
+    clear
+    fn_print_header "卸载咕咕助手 - 中转管理"
+
+    if ! fn_read_yes_no_prompt "确认要卸载咕咕助手 - 中转管理吗？" false "这将移除前端扩展、后端插件和托管仓库。"; then
+        fn_print_warning "操作已取消。"
+        fn_press_any_key
+        return
+    fi
+
+    rm -rf "$GUGU_TRANSIT_EXT_DIR" "$GUGU_TRANSIT_PLUGIN_DIR"
+    rm -rf "$LEGACY_GUGU_TRANSIT_EXT_DIR" "$LEGACY_GUGU_TRANSIT_PLUGIN_DIR"
+    rmdir "$LEGACY_GUGU_BOX_DIR" 2>/dev/null || true
+    fn_print_success "咕咕助手 - 中转管理 已卸载。"
+    fn_press_any_key
+}
+
+fn_menu_gugu_transit_manager() {
+    while true; do
+        clear
+        fn_print_header "咕咕助手 - 中转管理"
+        echo -e "      当前状态: $(fn_get_gugu_transit_status)"
+
+        if [ -d "$GUGU_TRANSIT_EXT_DIR/.git" ]; then
+            echo -e "      前端版本: ${YELLOW}$(fn_get_git_version "$GUGU_TRANSIT_EXT_DIR")${NC}"
+        fi
+        if [ -d "$GUGU_TRANSIT_PLUGIN_DIR/.git" ]; then
+            echo -e "      后端版本: ${YELLOW}$(fn_get_git_version "$GUGU_TRANSIT_PLUGIN_DIR")${NC}"
+        fi
+        echo ""
+        echo -e "      [01] ${CYAN}安装/更新${NC}"
+
+        if [ -d "$GUGU_TRANSIT_EXT_DIR" ] || [ -d "$GUGU_TRANSIT_PLUGIN_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_EXT_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_PLUGIN_DIR" ] || [ -L "$GUGU_TRANSIT_EXT_TARGET" ] || [ -L "$GUGU_TRANSIT_PLUGIN_TARGET" ]; then
+            echo -e "      [02] ${RED}卸载${NC}"
+        fi
+
+        echo -e "      [00] ${CYAN}返回上一级${NC}\n"
+
+        local allowed_choices="0/1"
+        if [ -d "$GUGU_TRANSIT_EXT_DIR" ] || [ -d "$GUGU_TRANSIT_PLUGIN_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_EXT_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_PLUGIN_DIR" ] || [ -L "$GUGU_TRANSIT_EXT_TARGET" ] || [ -L "$GUGU_TRANSIT_PLUGIN_TARGET" ]; then
+            allowed_choices="0-2"
+        fi
+
+        local choice
+        choice="$(fn_read_menu_prompt "$allowed_choices")"
+        case "$choice" in
+            1) fn_install_gugu_transit_manager ;;
+            2) fn_uninstall_gugu_transit_manager ;;
+            0) return ;;
+            *) fn_print_error "输入无效，请按提示重试。"; sleep 1 ;;
+        esac
+    done
+}
+
+fn_menu_gugu_box() {
+    while true; do
+        clear
+        fn_print_header "咕咕宝箱"
+        echo -e "      [01] ${CYAN}咕咕助手 - 中转管理${NC}  $(fn_get_gugu_transit_status)"
+        echo -e "      [00] ${CYAN}返回主菜单${NC}\n"
+
+        local choice
+        choice="$(fn_read_menu_prompt "0/1")"
+        case "$choice" in
+            1) fn_menu_gugu_transit_manager ;;
+            0) return ;;
+            *) fn_print_error "输入无效，请按提示重试。"; sleep 1 ;;
+        esac
+    done
+}
+
 fn_menu_version_management() {
     while true; do
         clear
@@ -2615,6 +2979,7 @@ fn_menu_st_config() {
         local curr_auth=$(fn_get_st_config_value "basicAuthMode")
         local curr_user=$(fn_get_st_config_value "enableUserAccounts")
         local curr_listen=$(fn_get_st_config_value "listen")
+        local curr_server_plugins=$(fn_get_st_config_value "enableServerPlugins")
 
         local mode_text="未知"
         if [[ "$curr_auth" == "false" && "$curr_user" == "false" ]]; then
@@ -2634,6 +2999,8 @@ fn_menu_st_config() {
         fi
         echo -en "      局域网访问: "
         if [[ "$curr_listen" == "true" ]]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
+        echo -en "      后端插件: "
+        if [[ "$curr_server_plugins" == "true" ]]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
 
         echo -e "\n      [1] ${CYAN}修改端口号${NC}"
         echo -e "      [2] ${CYAN}切换为：默认无账密模式${NC}"
@@ -2651,10 +3018,15 @@ fn_menu_st_config() {
         else
             echo -e "      [5] ${YELLOW}允许局域网访问 (需开启账密)${NC}"
         fi
+        if [[ "$curr_server_plugins" == "true" ]]; then
+            echo -e "      [6] ${RED}关闭后端插件${NC}"
+        else
+            echo -e "      [6] ${YELLOW}开启后端插件${NC}"
+        fi
         
         echo -e "\n      [0] ${CYAN}返回上一级${NC}"
 
-        choice="$(fn_read_menu_prompt "0-5")"
+        choice="$(fn_read_menu_prompt "0-6")"
         case "$choice" in
             1)
                 new_port="$(fn_read_text_prompt "请输入新的端口号 (1024-65535)" "" "" true)"
@@ -2771,6 +3143,17 @@ fn_menu_st_config() {
                 fi
                 fn_press_any_key
                 ;;
+            6)
+                if [[ "$curr_server_plugins" == "true" ]]; then
+                    fn_update_st_config_value "enableServerPlugins" "false"
+                    fn_print_success "后端插件已关闭。"
+                else
+                    fn_update_st_config_value "enableServerPlugins" "true"
+                    fn_print_success "后端插件已开启。"
+                fi
+                fn_print_warning "设置将在重启酒馆后生效。"
+                fn_press_any_key
+                ;;
             0) return ;;
             *) fn_print_error "输入无效，请按提示重试。"; sleep 1 ;;
         esac
@@ -2780,10 +3163,10 @@ fn_menu_st_config() {
 fn_menu_lab() {
     while true; do
         clear
-        fn_print_header "额外功能 (实验室)"
-        echo -e "      [1] ${CYAN}gcli2api${NC}"
-        echo -e "      [2] ${CYAN}酒馆配置管理${NC}"
-        echo -e "      [0] ${CYAN}返回主菜单${NC}\n"
+        fn_print_header "实验室"
+        echo -e "      [01] ${CYAN}gcli2api${NC}"
+        echo -e "      [02] ${CYAN}酒馆配置管理${NC}"
+        echo -e "      [00] ${CYAN}返回主菜单${NC}\n"
         local choice
         choice="$(fn_read_menu_prompt "0-2")"
         case $choice in
@@ -2805,16 +3188,12 @@ while true; do
     fi
 
     echo -e "\n    选择一个操作来开始：\n"
-    echo -e "      [1] ${GREEN}${BOLD}启动酒馆${NC}"
-    echo -e "      [2] ${CYAN}${BOLD}数据同步 (Git 云端)${NC}"
-    echo -e "      [3] ${CYAN}${BOLD}本地备份管理${NC}"
-    echo -e "      [4] ${YELLOW}${BOLD}首次部署 (全新安装)${NC}\n"
-    echo -e "      [5] 酒馆版本管理      [6] 更新咕咕助手${update_notice}"
-    echo -e "      [7] 管理助手自启      [8] 查看帮助文档"
-    echo -e "      [9] 配置网络代理      [11] ${CYAN}酒馆配置管理${NC}"
-    echo -e "      [10] 额外功能 (实验室)\n"
-    echo -e "      ${RED}[0] 退出咕咕助手${NC}\n"
-    choice="$(fn_read_menu_prompt "0-11")"
+    printf "      "; fn_print_menu_cell "$SOFT_ROSE" 1 "启动酒馆"; fn_print_menu_cell "$SOFT_AQUA" 2 "数据同步"; fn_print_menu_cell "$SOFT_GOLD" 3 "本地备份"; printf "\n"
+    printf "      "; fn_print_menu_cell "$SOFT_PEACH" 4 "首次部署"; fn_print_menu_cell "$SOFT_LAVENDER" 5 "酒馆版本管理"; fn_print_menu_cell "$SOFT_MINT" 6 "更新咕咕助手${update_notice}"; printf "\n"
+    printf "      "; fn_print_menu_cell "$SOFT_SKY" 7 "管理助手自启"; fn_print_menu_cell "$SOFT_LILAC" 8 "查看帮助文档"; fn_print_menu_cell "$SOFT_CORAL" 9 "配置网络代理"; printf "\n"
+    printf "      "; fn_print_menu_cell "$MAGENTA" 10 "实验室"; fn_print_menu_cell "$CYAN" 11 "酒馆配置管理"; fn_print_menu_cell "$GREEN" 12 "咕咕宝箱"; printf "\n\n"
+    printf "      %b[00] 退出咕咕助手%b\n\n" "$SOFT_PINK_RED" "$NC"
+    choice="$(fn_read_menu_prompt "0-12")"
 
     case $choice in
         1) fn_start_st ;;
@@ -2828,6 +3207,7 @@ while true; do
         9) fn_menu_proxy ;;
         10) fn_menu_lab ;;
         11) fn_menu_st_config ;;
+        12) fn_menu_gugu_box ;;
         0) echo -e "\n感谢使用，咕咕助手已退出。"; rm -f "$UPDATE_FLAG_FILE"; exit 0 ;;
         *) fn_print_warning "输入无效，请按提示重试。"; sleep 1.5 ;;
     esac

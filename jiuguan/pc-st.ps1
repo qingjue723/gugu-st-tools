@@ -7,7 +7,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-$ScriptVersion = "v5.19"
+$ScriptVersion = "v5.20"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -44,6 +44,15 @@ $SyncRulesConfigFile = Join-Path $ConfigDir "sync_rules.conf"
 $AgreementFile = Join-Path $ConfigDir ".agreement_shown"
 $LabConfigFile = Join-Path $ConfigDir "lab.conf"
 $GcliDir = Join-Path $ScriptBaseDir "gcli2api"
+$GuguTransitExtRepo = "https://github.com/canaan723/gugu-transit-manager.git"
+$GuguTransitPluginRepo = "https://github.com/canaan723/gugu-transit-manager-plugin.git"
+$GuguTransitExtTarget = Join-Path $ST_Dir "public/scripts/extensions/third-party/gugu-transit-manager"
+$GuguTransitPluginTarget = Join-Path $ST_Dir "plugins/gugu-transit-manager-plugin"
+$GuguTransitExtDir = $GuguTransitExtTarget
+$GuguTransitPluginDir = $GuguTransitPluginTarget
+$LegacyGuguBoxDir = Join-Path $ScriptBaseDir "gugu-box"
+$LegacyGuguTransitExtDir = Join-Path $LegacyGuguBoxDir "gugu-transit-manager"
+$LegacyGuguTransitPluginDir = Join-Path $LegacyGuguBoxDir "gugu-transit-manager-plugin"
 # 补全 AI Studio 相关路径变量
 $ais2apiDir = Join-Path $ScriptBaseDir "ais2api"
 $camoufoxDir = Join-Path $ais2apiDir "camoufox"
@@ -76,6 +85,62 @@ function Write-Error($Message) { Write-Host "✗ $Message" -ForegroundColor Red 
 function Write-ErrorExit($Message) { Write-Host "`n✗ $Message`n流程已终止。" -ForegroundColor Red; Press-Any-Key; exit }
 function Press-Any-Key { Write-Host "`n请按任意键返回..." -ForegroundColor Cyan; $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") | Out-Null }
 $script:GitLastOutputLines = @()
+$AnsiReset = "$([char]27)[0m"
+$SoftRose = "$([char]27)[38;5;217m"
+$SoftPeach = "$([char]27)[38;5;223m"
+$SoftGold = "$([char]27)[38;5;222m"
+$SoftMint = "$([char]27)[38;5;151m"
+$SoftAqua = "$([char]27)[38;5;159m"
+$SoftSky = "$([char]27)[38;5;117m"
+$SoftLavender = "$([char]27)[38;5;183m"
+$SoftLilac = "$([char]27)[38;5;177m"
+$SoftCoral = "$([char]27)[38;5;216m"
+$SoftPinkRed = "$([char]27)[38;5;211m"
+
+function Get-DisplayWidth {
+    param([string]$Text)
+
+    $width = 0
+    foreach ($char in $Text.ToCharArray()) {
+        if ([int][char]$char -le 127) {
+            $width += 1
+        } else {
+            $width += 2
+        }
+    }
+    return $width
+}
+
+function Pad-DisplayText {
+    param(
+        [string]$Text,
+        [int]$Width
+    )
+
+    $displayWidth = Get-DisplayWidth -Text $Text
+    if ($displayWidth -ge $Width) {
+        return $Text
+    }
+
+    return $Text + (" " * ($Width - $displayWidth))
+}
+
+function Write-MenuCell {
+    param(
+        [int]$Number,
+        [string]$Label,
+        [string]$Color = "",
+        [int]$Width = 18
+    )
+
+    $text = ("  [{0:d2}] {1}" -f $Number, (Pad-DisplayText -Text $Label -Width $Width))
+    if ([string]::IsNullOrWhiteSpace($Color)) {
+        Write-Host $text -NoNewline
+        return
+    }
+
+    Write-Host ($Color + $text + $AnsiReset) -NoNewline
+}
 
 function Invoke-GitWithProgress {
     param(
@@ -510,6 +575,28 @@ function Convert-GitHubUrlToMirrorUrl {
             return $null
         }
     }
+}
+
+function Get-GitUrlByRouteHost {
+    param(
+        [string]$RouteHost,
+        [string]$GitHubUrl
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RouteHost) -or [string]::IsNullOrWhiteSpace($GitHubUrl)) {
+        return $null
+    }
+
+    if ($RouteHost -eq "github.com") {
+        return $GitHubUrl
+    }
+
+    $mirror = $Mirror_List | Where-Object { $_.Host -eq $RouteHost } | Select-Object -First 1
+    if ($null -eq $mirror) {
+        return $null
+    }
+
+    return (Convert-GitHubUrlToMirrorUrl -Mirror $mirror -GitHubUrl $GitHubUrl)
 }
 
 function Get-GitHubDownloadCandidates {
@@ -2237,6 +2324,335 @@ function Get-GitVersionInfo {
     return "未知"
 }
 
+function Resolve-ExistingPath {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $null }
+    try {
+        return (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    } catch {
+        return $null
+    }
+}
+
+function Test-ManagedDirectoryLink {
+    param(
+        [string]$TargetPath,
+        [string]$SourcePath
+    )
+
+    if (-not (Test-Path $TargetPath)) { return $false }
+
+    try {
+        $item = Get-Item -LiteralPath $TargetPath -Force -ErrorAction Stop
+    } catch {
+        return $false
+    }
+
+    if (-not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        return $false
+    }
+
+    $resolvedTarget = Resolve-ExistingPath -Path $TargetPath
+    $resolvedSource = Resolve-ExistingPath -Path $SourcePath
+    if ([string]::IsNullOrWhiteSpace($resolvedTarget) -or [string]::IsNullOrWhiteSpace($resolvedSource)) {
+        return $false
+    }
+
+    return $resolvedTarget -eq $resolvedSource
+}
+
+function Install-ManagedRepo {
+    param(
+        [string]$ProjectName,
+        [string]$RepoUrl,
+        [string]$InstallDir,
+        [string]$RouteHost
+    )
+
+    if ((Test-Path $InstallDir) -and -not (Test-Path (Join-Path $InstallDir ".git"))) {
+        Write-Error "$ProjectName 目录已存在，但不是 Git 仓库：$InstallDir"
+        return $false
+    }
+
+    if ([string]::IsNullOrWhiteSpace($RouteHost)) {
+        $selectedRoute = Resolve-DownloadRoute -OperationName "部署 $ProjectName" -GitUrl $RepoUrl
+        if (-not $selectedRoute) {
+            Write-Error "未能为 $ProjectName 选定可用下载线路。"
+            return $false
+        }
+        $resolvedGitUrl = $selectedRoute.GitUrl
+    } else {
+        $resolvedGitUrl = Get-GitUrlByRouteHost -RouteHost $RouteHost -GitHubUrl $RepoUrl
+        if ([string]::IsNullOrWhiteSpace($resolvedGitUrl)) {
+            Write-Error "无法将线路 [$RouteHost] 应用于 $ProjectName。"
+            return $false
+        }
+    }
+
+    if (Test-Path (Join-Path $InstallDir ".git")) {
+        Set-Location $InstallDir
+        git remote set-url origin $resolvedGitUrl
+        if (-not (Invoke-GitWithProgress -OperationName "拉取 $ProjectName 更新" -GitArgs @('fetch', '--progress', '--all'))) {
+            Set-Location $ScriptBaseDir
+            Write-Error "$ProjectName 拉取更新失败：`n$(Get-GitLastOutputTail -Lines 8)"
+            return $false
+        }
+
+        git reset --hard origin/$(git rev-parse --abbrev-ref HEAD)
+        if ($LASTEXITCODE -ne 0) {
+            Set-Location $ScriptBaseDir
+            Write-Error "$ProjectName 更新失败，请检查目录权限或 Git 状态。"
+            return $false
+        }
+
+        Set-Location $ScriptBaseDir
+        return $true
+    }
+
+    New-Item -Path (Split-Path -Path $InstallDir -Parent) -ItemType Directory -Force | Out-Null
+    if (-not (Invoke-GitWithProgress -OperationName "克隆 $ProjectName 仓库" -GitArgs @('clone', '--progress', $resolvedGitUrl, $InstallDir))) {
+        Write-Error "$ProjectName 克隆失败：`n$(Get-GitLastOutputTail -Lines 8)"
+        return $false
+    }
+
+    return $true
+}
+
+function New-ManagedDirectoryLink {
+    param(
+        [string]$SourcePath,
+        [string]$TargetPath
+    )
+
+    if (-not (Test-Path $SourcePath)) {
+        Write-Error "无法创建连接，源目录不存在：$SourcePath"
+        return $false
+    }
+
+    if (Test-Path $TargetPath) {
+        if (Test-ManagedDirectoryLink -TargetPath $TargetPath -SourcePath $SourcePath) {
+            return $true
+        }
+        Write-Error "目标位置已存在非托管目录或其他连接，请先手动处理：$TargetPath"
+        return $false
+    }
+
+    New-Item -Path (Split-Path -Path $TargetPath -Parent) -ItemType Directory -Force | Out-Null
+    try {
+        New-Item -Path $TargetPath -ItemType Junction -Target $SourcePath -ErrorAction Stop | Out-Null
+        return $true
+    } catch {
+        Write-Error "创建目录连接失败：$($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Move-LegacyGuguTransitDir {
+    param(
+        [string]$LegacyPath,
+        [string]$TargetPath
+    )
+
+    if (-not (Test-Path $LegacyPath)) {
+        return $true
+    }
+
+    if (Test-ManagedDirectoryLink -TargetPath $TargetPath -SourcePath $LegacyPath) {
+        Remove-Item -LiteralPath $TargetPath -Force -ErrorAction Stop
+        Move-Item -Path $LegacyPath -Destination $TargetPath -Force
+        return $true
+    }
+
+    if (Test-Path $TargetPath) {
+        return $true
+    }
+
+    New-Item -Path (Split-Path -Path $TargetPath -Parent) -ItemType Directory -Force | Out-Null
+    Move-Item -Path $LegacyPath -Destination $TargetPath -Force
+    return $true
+}
+
+function Remove-ManagedDirectoryLink {
+    param(
+        [string]$SourcePath,
+        [string]$TargetPath
+    )
+
+    if (-not (Test-Path $TargetPath)) {
+        return $true
+    }
+
+    if (-not (Test-ManagedDirectoryLink -TargetPath $TargetPath -SourcePath $SourcePath)) {
+        Write-Error "目标位置不是当前托管项目的目录连接，拒绝自动删除：$TargetPath"
+        return $false
+    }
+
+    try {
+        Remove-Item -LiteralPath $TargetPath -Force -ErrorAction Stop
+        return $true
+    } catch {
+        Write-Error "删除目录连接失败：$($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Get-GuguTransitStatus {
+    $extReady = Test-Path (Join-Path $GuguTransitExtDir ".git")
+    $pluginReady = Test-Path (Join-Path $GuguTransitPluginDir ".git")
+
+    if ($extReady -and $pluginReady) { return "已安装" }
+    if ((Test-Path $GuguTransitExtDir) -or (Test-Path $GuguTransitPluginDir) -or (Test-Path $LegacyGuguTransitExtDir) -or (Test-Path $LegacyGuguTransitPluginDir) -or (Test-Path $GuguTransitExtTarget) -or (Test-Path $GuguTransitPluginTarget)) {
+        return "安装不完整"
+    }
+
+    return "未安装"
+}
+
+function Install-GuguTransitManager {
+    Clear-Host
+    Write-Header "安装/更新咕咕助手 - 中转管理"
+    $selectedRoute = $null
+    $serverPluginsEnabled = $false
+
+    if (-not (Test-Path $ST_Dir)) {
+        Write-Error "未检测到酒馆目录，请先完成首次部署。"
+        Press-Any-Key
+        return
+    }
+
+    try {
+        if (-not (Move-LegacyGuguTransitDir -LegacyPath $LegacyGuguTransitExtDir -TargetPath $GuguTransitExtDir)) {
+            Write-Error "旧版前端目录迁移失败。"
+            Press-Any-Key
+            return
+        }
+
+        if (-not (Move-LegacyGuguTransitDir -LegacyPath $LegacyGuguTransitPluginDir -TargetPath $GuguTransitPluginDir)) {
+            Write-Error "旧版后端目录迁移失败。"
+            Press-Any-Key
+            return
+        }
+    } catch {
+        Write-Error "旧版目录迁移失败：$($_.Exception.Message)"
+        Press-Any-Key
+        return
+    }
+
+    $selectedRoute = Resolve-DownloadRoute -OperationName "部署 咕咕助手 - 中转管理" -GitUrl $GuguTransitExtRepo
+    if (-not $selectedRoute) {
+        Write-Error "未能为咕咕助手 - 中转管理选定可用下载线路。"
+        Press-Any-Key
+        return
+    }
+
+    if (-not (Install-ManagedRepo -ProjectName "前端扩展" -RepoUrl $GuguTransitExtRepo -InstallDir $GuguTransitExtDir -RouteHost $selectedRoute.Host)) {
+        Press-Any-Key
+        return
+    }
+
+    if (-not (Install-ManagedRepo -ProjectName "后端插件" -RepoUrl $GuguTransitPluginRepo -InstallDir $GuguTransitPluginDir -RouteHost $selectedRoute.Host)) {
+        Press-Any-Key
+        return
+    }
+
+    $serverPluginsEnabled = (Get-STConfigValue "enableServerPlugins") -eq "true"
+    if (-not $serverPluginsEnabled) {
+        Update-STConfigValue "enableServerPlugins" "true" | Out-Null
+        Write-Warning "检测到酒馆后端插件原本未开启，已自动开启。"
+    }
+
+    Write-Success "咕咕助手 - 中转管理 已安装/更新完成。"
+    Write-Warning "如酒馆正在运行，必须重启一次后再使用。"
+    Press-Any-Key
+}
+
+function Uninstall-GuguTransitManager {
+    Clear-Host
+    Write-Header "卸载咕咕助手 - 中转管理"
+
+    if (-not (Read-YesNoPrompt -Label "卸载咕咕助手 - 中转管理" -DefaultYes $false -Note "这将移除前端扩展、后端插件和托管仓库。")) {
+        Write-Warning "操作已取消。"
+        Press-Any-Key
+        return
+    }
+
+    if (Test-Path $GuguTransitExtDir) {
+        Remove-Item -Path $GuguTransitExtDir -Recurse -Force
+    }
+    if (Test-Path $GuguTransitPluginDir) {
+        Remove-Item -Path $GuguTransitPluginDir -Recurse -Force
+    }
+    if (Test-Path $LegacyGuguTransitExtDir) {
+        Remove-Item -Path $LegacyGuguTransitExtDir -Recurse -Force
+    }
+    if (Test-Path $LegacyGuguTransitPluginDir) {
+        Remove-Item -Path $LegacyGuguTransitPluginDir -Recurse -Force
+    }
+    if (Test-Path $LegacyGuguBoxDir) {
+        try { Remove-Item -Path $LegacyGuguBoxDir -Force -ErrorAction Stop } catch {}
+    }
+
+    Write-Success "咕咕助手 - 中转管理 已卸载。"
+    Press-Any-Key
+}
+
+function Show-GuguTransitManagerMenu {
+    while ($true) {
+        Clear-Host
+        Write-Header "咕咕助手 - 中转管理"
+        $status = Get-GuguTransitStatus
+        Write-Host "      当前状态: " -NoNewline
+        switch ($status) {
+            "已安装" { Write-Host $status -ForegroundColor Green }
+            "安装不完整" { Write-Host $status -ForegroundColor Yellow }
+            default { Write-Host $status -ForegroundColor Red }
+        }
+
+        if (Test-Path (Join-Path $GuguTransitExtDir ".git")) {
+            Write-Host "      前端版本: " -NoNewline
+            Write-Host (Get-GitVersionInfo -Path $GuguTransitExtDir) -ForegroundColor Yellow
+        }
+        if (Test-Path (Join-Path $GuguTransitPluginDir ".git")) {
+            Write-Host "      后端版本: " -NoNewline
+            Write-Host (Get-GitVersionInfo -Path $GuguTransitPluginDir) -ForegroundColor Yellow
+        }
+
+        Write-Host ""
+        Write-Host "      [01] " -NoNewline; Write-Host "安装/更新" -ForegroundColor Cyan
+        if (($status -ne "未安装") -or (Test-Path $LegacyGuguTransitExtDir) -or (Test-Path $LegacyGuguTransitPluginDir)) {
+            Write-Host "      [02] " -NoNewline; Write-Host "卸载" -ForegroundColor Red
+        }
+        Write-Host "      [00] " -NoNewline; Write-Host "返回上一级" -ForegroundColor Cyan
+
+        $allowedChoices = if (($status -eq "未安装") -and -not (Test-Path $LegacyGuguTransitExtDir) -and -not (Test-Path $LegacyGuguTransitPluginDir)) { "0/1" } else { "0-2" }
+        $choice = Read-MenuPrompt -Allowed $allowedChoices
+        switch ($choice) {
+            "1" { Install-GuguTransitManager }
+            "2" { Uninstall-GuguTransitManager }
+            "0" { return }
+            default { Write-Warning "输入无效，请按提示重试。"; Start-Sleep 1 }
+        }
+    }
+}
+
+function Show-GuguBoxMenu {
+    while ($true) {
+        Clear-Host
+        Write-Header "咕咕宝箱"
+        $status = Get-GuguTransitStatus
+        Write-Host "      [01] " -NoNewline; Write-Host "咕咕助手 - 中转管理" -ForegroundColor Cyan -NoNewline
+        Write-Host "  [$status]" -ForegroundColor DarkGray
+        Write-Host "      [00] " -NoNewline; Write-Host "返回主菜单" -ForegroundColor Cyan
+
+        $choice = Read-MenuPrompt -Allowed "0/1"
+        switch ($choice) {
+            "1" { Show-GuguTransitManagerMenu }
+            "0" { return }
+            default { Write-Warning "输入无效，请按提示重试。"; Start-Sleep 1 }
+        }
+    }
+}
+
 function Get-Gcli2ApiStatus {
     $connection = Get-NetTCPConnection -LocalPort 7861 -State Listen -ErrorAction SilentlyContinue
     if ($null -ne $connection) {
@@ -2526,6 +2942,7 @@ function Show-STConfigMenu {
         $currAuth = Get-STConfigValue "basicAuthMode"
         $currUser = Get-STConfigValue "enableUserAccounts"
         $currListen = Get-STConfigValue "listen"
+        $currServerPlugins = Get-STConfigValue "enableServerPlugins"
 
         $isSingleUser = ($currAuth -eq "true" -and $currUser -eq "false")
         $isMultiUser = ($currAuth -eq "false" -and $currUser -eq "true")
@@ -2545,6 +2962,8 @@ function Show-STConfigMenu {
         }
         Write-Host "      局域网访问: " -NoNewline
         if ($currListen -eq "true") { Write-Host "已开启" -ForegroundColor Green } else { Write-Host "已关闭" -ForegroundColor Red }
+        Write-Host "      后端插件: " -NoNewline
+        if ($currServerPlugins -eq "true") { Write-Host "已开启" -ForegroundColor Green } else { Write-Host "已关闭" -ForegroundColor Red }
 
         Write-Host "`n      [1] " -NoNewline; Write-Host "修改端口号" -ForegroundColor Cyan
         Write-Host "      [2] " -NoNewline; Write-Host "切换为：默认无账密模式" -ForegroundColor Cyan
@@ -2556,10 +2975,12 @@ function Show-STConfigMenu {
         
         Write-Host "      [5] " -NoNewline
         if ($currListen -eq "true") { Write-Host "关闭局域网访问" -ForegroundColor Red } else { Write-Host "允许局域网访问 (需开启账密)" -ForegroundColor Yellow }
+        Write-Host "      [6] " -NoNewline
+        if ($currServerPlugins -eq "true") { Write-Host "关闭后端插件" -ForegroundColor Red } else { Write-Host "开启后端插件" -ForegroundColor Yellow }
         
         Write-Host "`n      [0] " -NoNewline; Write-Host "返回主菜单" -ForegroundColor Cyan
 
-        $choice = Read-MenuPrompt -Allowed "0-5"
+        $choice = Read-MenuPrompt -Allowed "0-6"
         switch ($choice) {
             "1" {
                 $newPort = Read-TextPrompt -Label "端口号" -Hint "1024-65535"
@@ -2688,6 +3109,17 @@ function Show-STConfigMenu {
                 }
                 Press-Any-Key
             }
+            "6" {
+                if ($currServerPlugins -eq "true") {
+                    Update-STConfigValue "enableServerPlugins" "false" | Out-Null
+                    Write-Success "后端插件已关闭。"
+                } else {
+                    Update-STConfigValue "enableServerPlugins" "true" | Out-Null
+                    Write-Success "后端插件已开启。"
+                }
+                Write-Warning "设置将在重启酒馆后生效。"
+                Press-Any-Key
+            }
             "0" { return }
             default { Write-Warning "输入无效，请按提示重试。"; Start-Sleep 1 }
         }
@@ -2697,11 +3129,11 @@ function Show-STConfigMenu {
 function Show-ExtraFeaturesMenu {
     while ($true) {
         Clear-Host
-        Write-Header "额外功能 (实验室)"
-        Write-Host "      [1] " -NoNewline; Write-Host "gcli2api 管理" -ForegroundColor Cyan
-        Write-Host "      [3] " -NoNewline; Write-Host "酒馆配置管理" -ForegroundColor Cyan
-        Write-Host "      [9] " -NoNewline; Write-Host "获取 AI Studio 凭证" -ForegroundColor Cyan
-        Write-Host "`n      [0] " -NoNewline; Write-Host "返回主菜单" -ForegroundColor Cyan
+        Write-Header "实验室"
+        Write-Host "      [01] " -NoNewline; Write-Host "gcli2api 管理" -ForegroundColor Cyan
+        Write-Host "      [03] " -NoNewline; Write-Host "酒馆配置管理" -ForegroundColor Cyan
+        Write-Host "      [09] " -NoNewline; Write-Host "获取 AI Studio 凭证" -ForegroundColor Cyan
+        Write-Host "`n      [00] " -NoNewline; Write-Host "返回主菜单" -ForegroundColor Cyan
         $choice = Read-MenuPrompt -Allowed "0/1/3/9"
         switch ($choice) {
             "1" { Show-Gcli2ApiMenu }
@@ -2961,16 +3393,12 @@ while ($true) {
     Show-Header
     $updateNoticeText = if (Test-Path $UpdateFlagFile) { " [!] 有更新" } else { "" }
     Write-Host "`n    选择一个操作来开始：`n"
-    Write-Host "      [1] " -NoNewline -ForegroundColor Green; Write-Host "启动酒馆"
-    Write-Host "      [2] " -NoNewline -ForegroundColor Cyan; Write-Host "数据同步 (Git 云端)"
-    Write-Host "      [3] " -NoNewline -ForegroundColor Cyan; Write-Host "本地备份管理"
-    Write-Host "      [4] " -NoNewline -ForegroundColor Yellow; Write-Host "首次部署 (全新安装)`n"
-    Write-Host "      [5] 酒馆版本管理      [6] 更新咕咕助手$($updateNoticeText)"
-    Write-Host "      [7] 打开酒馆文件夹    [8] 查看帮助文档"
-    Write-Host "      [9] 配置网络代理      [11] " -NoNewline; Write-Host "酒馆配置管理" -ForegroundColor Cyan
-    Write-Host "      [10] " -NoNewline -ForegroundColor Magenta; Write-Host "额外功能 (实验室)`n"
-    Write-Host "      [0] " -NoNewline -ForegroundColor Red; Write-Host "退出咕咕助手`n"
-    $choice = Read-MenuPrompt -Allowed "0-11"
+    Write-Host "      " -NoNewline; Write-MenuCell -Number 1 -Label "启动酒馆" -Color $SoftRose; Write-MenuCell -Number 2 -Label "数据同步" -Color $SoftAqua; Write-MenuCell -Number 3 -Label "本地备份" -Color $SoftGold; Write-Host ""
+    Write-Host "      " -NoNewline; Write-MenuCell -Number 4 -Label "首次部署" -Color $SoftPeach; Write-MenuCell -Number 5 -Label "酒馆版本管理" -Color $SoftLavender; Write-MenuCell -Number 6 -Label "更新咕咕助手$($updateNoticeText)" -Color $SoftMint; Write-Host ""
+    Write-Host "      " -NoNewline; Write-MenuCell -Number 7 -Label "打开酒馆文件夹" -Color $SoftSky; Write-MenuCell -Number 8 -Label "查看帮助文档" -Color $SoftLilac; Write-MenuCell -Number 9 -Label "配置网络代理" -Color $SoftCoral; Write-Host ""
+    Write-Host "      " -NoNewline; Write-MenuCell -Number 10 -Label "实验室" -Color "$([char]27)[38;5;176m"; Write-MenuCell -Number 11 -Label "酒馆配置管理" -Color "$([char]27)[38;5;153m"; Write-MenuCell -Number 12 -Label "咕咕宝箱" -Color "$([char]27)[38;5;121m"; Write-Host "`n"
+    Write-Host ("      " + $SoftPinkRed + "[00] 退出咕咕助手" + $AnsiReset + "`n")
+    $choice = Read-MenuPrompt -Allowed "0-12"
     switch ($choice) {
         "1" { Start-SillyTavern }
         "2" { Show-GitSyncMenu }
@@ -2983,6 +3411,7 @@ while ($true) {
         "9" { Show-ManageProxyMenu }
         "10" { Show-ExtraFeaturesMenu }
         "11" { Show-STConfigMenu }
+        "12" { Show-GuguBoxMenu }
         "0" { if (Test-Path $UpdateFlagFile) { Remove-Item $UpdateFlagFile -Force }; Write-Host "感谢使用，咕咕助手已退出。"; exit }
         default { Write-Warning "输入无效，请按提示重试。"; Start-Sleep -Seconds 1.5 }
     }
