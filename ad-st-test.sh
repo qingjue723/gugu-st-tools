@@ -48,8 +48,11 @@ AGREEMENT_FILE="$CONFIG_DIR/.agreement_shown"
 
 GCLI_DIR="$HOME/gcli2api"
 SCRIPT_BASE_DIR="$(dirname "$SCRIPT_SELF_PATH")"
-GUGU_TRANSIT_EXT_REPO="https://github.com/canaan723/gugu-transit-manager.git"
-GUGU_TRANSIT_PLUGIN_REPO="https://github.com/canaan723/gugu-transit-manager-plugin.git"
+GUGU_TRANSIT_EXT_GITHUB_REPO="https://github.com/canaan723/gugu-transit-manager.git"
+GUGU_TRANSIT_PLUGIN_GITHUB_REPO="https://github.com/canaan723/gugu-transit-manager-plugin.git"
+GUGU_TRANSIT_EXT_GITEE_REPO="https://gitee.com/canaan723/gugu-transit-manager.git"
+GUGU_TRANSIT_PLUGIN_GITEE_REPO="https://gitee.com/canaan723/gugu-transit-manager-plugin.git"
+GUGU_TRANSIT_ROUTE_MODE_KEY="GUGU_TRANSIT_ROUTE_MODE"
 GUGU_TRANSIT_EXT_TARGET="$ST_DIR/public/scripts/extensions/third-party/gugu-transit-manager"
 GUGU_TRANSIT_PLUGIN_TARGET="$ST_DIR/plugins/gugu-transit-manager-plugin"
 GUGU_TRANSIT_EXT_DIR="$GUGU_TRANSIT_EXT_TARGET"
@@ -79,7 +82,7 @@ GIT_LAST_LOG_FILE=""
 PKG_NONINTERACTIVE_NOTICE_SHOWN="false"
 
 fn_show_main_header() {
-    echo -e "    ${YELLOW}>>${GREEN} 清绝咕咕助手 v5.192${NC}"
+    echo -e "    ${YELLOW}>>${GREEN} 清绝咕咕助手 v5.23${NC}"
     echo -e "       ${BOLD}\033[0;37m作者: 清绝 | 网址: blog.qjyg.de${NC}"
     echo -e "    ${RED}本脚本为免费工具，严禁用于商业倒卖！${NC}"
 }
@@ -2402,6 +2405,7 @@ fn_deploy_managed_repo() {
     local repo_url="$2"
     local install_dir="$3"
     local route_host="${4:-}"
+    local direct_repo_url="${5:-}"
     local route_json route_url
 
     if [ -e "$install_dir" ] && [ ! -d "$install_dir/.git" ]; then
@@ -2409,7 +2413,9 @@ fn_deploy_managed_repo() {
         return 1
     fi
 
-    if [[ -n "$route_host" ]]; then
+    if [[ -n "$direct_repo_url" ]]; then
+        route_url="$direct_repo_url"
+    elif [[ -n "$route_host" ]]; then
         if ! route_url="$(fn_get_git_url_by_route_host "$route_host" "$repo_url")"; then
             fn_print_error "无法将线路 [$route_host] 应用于 ${project_name}。"
             return 1
@@ -2558,6 +2564,113 @@ fn_write_gugu_transit_install_marker() {
 }
 EOF
 }
+
+fn_get_gugu_transit_route_mode() {
+    local mode="auto"
+    if [ -f "$LAB_CONFIG_FILE" ]; then
+        local route_line
+        route_line="$(grep '^GUGU_TRANSIT_ROUTE_MODE=' "$LAB_CONFIG_FILE" 2>/dev/null | tail -n 1)"
+        if [[ -n "$route_line" ]]; then
+            mode="${route_line#*=}"
+            mode="${mode%\"}"
+            mode="${mode#\"}"
+        fi
+    fi
+
+    case "$mode" in
+        auto|mainland|overseas) echo "$mode" ;;
+        *) echo "auto" ;;
+    esac
+}
+
+fn_set_gugu_transit_route_mode() {
+    local mode="$1"
+
+    mkdir -p "$CONFIG_DIR"
+    touch "$LAB_CONFIG_FILE"
+    sed -i "/^${GUGU_TRANSIT_ROUTE_MODE_KEY}=/d" "$LAB_CONFIG_FILE"
+    echo "${GUGU_TRANSIT_ROUTE_MODE_KEY}=\"${mode}\"" >> "$LAB_CONFIG_FILE"
+}
+
+fn_resolve_gugu_transit_route() {
+    local mode
+    mode="$(fn_get_gugu_transit_route_mode)"
+
+    if [[ "$mode" == "auto" ]]; then
+        if fn_test_google_reachability >/dev/null 2>&1; then
+            echo "overseas"
+        else
+            echo "mainland"
+        fi
+        return
+    fi
+
+    echo "$mode"
+}
+
+fn_get_gugu_transit_route_label() {
+    local route="$1"
+    if [[ "$route" == "overseas" ]]; then
+        echo "海外 / GitHub"
+    else
+        echo "中国大陆 / Gitee"
+    fi
+}
+
+fn_get_gugu_transit_route_mode_label() {
+    local mode route_label
+    mode="$(fn_get_gugu_transit_route_mode)"
+    route_label="$(fn_get_gugu_transit_route_label "$(fn_resolve_gugu_transit_route)")"
+
+    if [[ "$mode" == "auto" ]]; then
+        echo "自动（当前：${route_label}）"
+    else
+        echo "手动：${route_label}"
+    fi
+}
+
+fn_get_gugu_transit_repo_url() {
+    local route="$1"
+    local component="$2"
+
+    if [[ "$route" == "overseas" ]]; then
+        if [[ "$component" == "frontend" ]]; then
+            echo "$GUGU_TRANSIT_EXT_GITHUB_REPO"
+        else
+            echo "$GUGU_TRANSIT_PLUGIN_GITHUB_REPO"
+        fi
+        return
+    fi
+
+    if [[ "$component" == "frontend" ]]; then
+        echo "$GUGU_TRANSIT_EXT_GITEE_REPO"
+    else
+        echo "$GUGU_TRANSIT_PLUGIN_GITEE_REPO"
+    fi
+}
+
+fn_menu_gugu_transit_route_mode() {
+    while true; do
+        clear
+        fn_print_header "切换中转管理仓库"
+        echo -e "      当前模式: ${YELLOW}$(fn_get_gugu_transit_route_mode_label)${NC}\n"
+        echo -e "      [01] ${CYAN}自动选择${NC}"
+        echo -e "      [02] ${CYAN}中国大陆 / Gitee${NC}"
+        echo -e "      [03] ${CYAN}海外 / GitHub${NC}"
+        echo -e "      [00] ${CYAN}返回上一级${NC}\n"
+
+        local choice
+        choice="$(fn_read_menu_prompt "0-3")"
+        case "$choice" in
+            1) fn_set_gugu_transit_route_mode "auto"; fn_print_success "已切换为自动选择。"; sleep 1; return ;;
+            2) fn_set_gugu_transit_route_mode "mainland"; fn_print_success "已切换为中国大陆 / Gitee。"; sleep 1; return ;;
+            3) fn_set_gugu_transit_route_mode "overseas"; fn_print_success "已切换为海外 / GitHub。"; sleep 1; return ;;
+            0) return ;;
+            *) fn_print_error "输入无效，请按提示重试。"; sleep 1 ;;
+        esac
+    done
+}
+
 fn_get_gugu_transit_status() {
     local ext_ready=false
     local plugin_ready=false
@@ -2586,7 +2699,7 @@ fn_get_gugu_transit_status() {
 fn_install_gugu_transit_manager() {
     clear
     fn_print_header "安装/更新咕咕助手 - 中转管理"
-    local selected_route route_host
+    local route frontend_repo_url backend_repo_url
     local current_server_plugins
 
     if [ ! -d "$ST_DIR" ]; then
@@ -2605,19 +2718,17 @@ fn_install_gugu_transit_manager() {
         return
     fi
 
-    if ! selected_route="$(fn_resolve_download_route "部署 咕咕助手 - 中转管理" "$GUGU_TRANSIT_EXT_REPO")"; then
-        fn_print_error "未能为咕咕助手 - 中转管理选定可用下载线路。"
-        fn_press_any_key
-        return
-    fi
-    route_host="$(echo "$selected_route" | cut -d'|' -f1)"
+    route="$(fn_resolve_gugu_transit_route)"
+    frontend_repo_url="$(fn_get_gugu_transit_repo_url "$route" frontend)"
+    backend_repo_url="$(fn_get_gugu_transit_repo_url "$route" backend)"
+    echo -e "      当前仓库: ${YELLOW}$(fn_get_gugu_transit_route_label "$route")${NC}"
 
-    if ! fn_deploy_managed_repo "前端扩展" "$GUGU_TRANSIT_EXT_REPO" "$GUGU_TRANSIT_EXT_DIR" "$route_host"; then
+    if ! fn_deploy_managed_repo "前端扩展" "$frontend_repo_url" "$GUGU_TRANSIT_EXT_DIR" "" "$frontend_repo_url"; then
         fn_press_any_key
         return
     fi
 
-    if ! fn_deploy_managed_repo "后端插件" "$GUGU_TRANSIT_PLUGIN_REPO" "$GUGU_TRANSIT_PLUGIN_DIR" "$route_host"; then
+    if ! fn_deploy_managed_repo "后端插件" "$backend_repo_url" "$GUGU_TRANSIT_PLUGIN_DIR" "" "$backend_repo_url"; then
         fn_press_any_key
         return
     fi
@@ -2656,6 +2767,7 @@ fn_menu_gugu_transit_manager() {
         clear
         fn_print_header "咕咕助手 - 中转管理"
         echo -e "      当前状态: $(fn_get_gugu_transit_status)"
+        echo -e "      当前仓库: ${YELLOW}$(fn_get_gugu_transit_route_mode_label)${NC}"
 
         if [ -d "$GUGU_TRANSIT_EXT_DIR/.git" ]; then
             echo -e "      前端版本: ${YELLOW}$(fn_get_git_version "$GUGU_TRANSIT_EXT_DIR")${NC}"
@@ -2669,12 +2781,13 @@ fn_menu_gugu_transit_manager() {
         if [ -d "$GUGU_TRANSIT_EXT_DIR" ] || [ -d "$GUGU_TRANSIT_PLUGIN_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_EXT_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_PLUGIN_DIR" ] || [ -L "$GUGU_TRANSIT_EXT_TARGET" ] || [ -L "$GUGU_TRANSIT_PLUGIN_TARGET" ]; then
             echo -e "      [02] ${RED}卸载${NC}"
         fi
+        echo -e "      [03] ${CYAN}切换海内外仓库${NC}"
 
         echo -e "      [00] ${CYAN}返回上一级${NC}\n"
 
-        local allowed_choices="0/1"
+        local allowed_choices="0/1/3"
         if [ -d "$GUGU_TRANSIT_EXT_DIR" ] || [ -d "$GUGU_TRANSIT_PLUGIN_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_EXT_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_PLUGIN_DIR" ] || [ -L "$GUGU_TRANSIT_EXT_TARGET" ] || [ -L "$GUGU_TRANSIT_PLUGIN_TARGET" ]; then
-            allowed_choices="0-2"
+            allowed_choices="0-3"
         fi
 
         local choice
@@ -2682,6 +2795,7 @@ fn_menu_gugu_transit_manager() {
         case "$choice" in
             1) fn_install_gugu_transit_manager ;;
             2) fn_uninstall_gugu_transit_manager ;;
+            3) fn_menu_gugu_transit_route_mode ;;
             0) return ;;
             *) fn_print_error "输入无效，请按提示重试。"; sleep 1 ;;
         esac

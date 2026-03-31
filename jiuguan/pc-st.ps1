@@ -7,7 +7,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-$ScriptVersion = "v5.22"
+$ScriptVersion = "v5.23"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -44,8 +44,11 @@ $SyncRulesConfigFile = Join-Path $ConfigDir "sync_rules.conf"
 $AgreementFile = Join-Path $ConfigDir ".agreement_shown"
 $LabConfigFile = Join-Path $ConfigDir "lab.conf"
 $GcliDir = Join-Path $ScriptBaseDir "gcli2api"
-$GuguTransitExtRepo = "https://github.com/canaan723/gugu-transit-manager.git"
-$GuguTransitPluginRepo = "https://github.com/canaan723/gugu-transit-manager-plugin.git"
+$GuguTransitExtGitHubRepo = "https://github.com/canaan723/gugu-transit-manager.git"
+$GuguTransitPluginGitHubRepo = "https://github.com/canaan723/gugu-transit-manager-plugin.git"
+$GuguTransitExtGiteeRepo = "https://gitee.com/canaan723/gugu-transit-manager.git"
+$GuguTransitPluginGiteeRepo = "https://gitee.com/canaan723/gugu-transit-manager-plugin.git"
+$GuguTransitRouteModeKey = "GUGU_TRANSIT_ROUTE_MODE"
 $GuguTransitExtTarget = Join-Path $ST_Dir "public/scripts/extensions/third-party/gugu-transit-manager"
 $GuguTransitPluginTarget = Join-Path $ST_Dir "plugins/gugu-transit-manager-plugin"
 $GuguTransitExtDir = $GuguTransitExtTarget
@@ -2366,7 +2369,8 @@ function Install-ManagedRepo {
         [string]$ProjectName,
         [string]$RepoUrl,
         [string]$InstallDir,
-        [string]$RouteHost
+        [string]$RouteHost,
+        [string]$DirectRepoUrl
     )
 
     if ((Test-Path $InstallDir) -and -not (Test-Path (Join-Path $InstallDir ".git"))) {
@@ -2374,7 +2378,9 @@ function Install-ManagedRepo {
         return $false
     }
 
-    if ([string]::IsNullOrWhiteSpace($RouteHost)) {
+    if (-not [string]::IsNullOrWhiteSpace($DirectRepoUrl)) {
+        $resolvedGitUrl = $DirectRepoUrl
+    } elseif ([string]::IsNullOrWhiteSpace($RouteHost)) {
         $selectedRoute = Resolve-DownloadRoute -OperationName "部署 $ProjectName" -GitUrl $RepoUrl
         if (-not $selectedRoute) {
             Write-Error "未能为 $ProjectName 选定可用下载线路。"
@@ -2520,6 +2526,85 @@ function Write-GuguTransitInstallMarker {
     $json = $payload | ConvertTo-Json -Depth 4
     [System.IO.File]::WriteAllText($markerPath, $json, [System.Text.UTF8Encoding]::new($false))
 }
+
+function Get-GuguTransitRouteMode {
+    $labConfig = Parse-ConfigFile $LabConfigFile
+    $mode = if ($labConfig.ContainsKey($GuguTransitRouteModeKey)) { $labConfig[$GuguTransitRouteModeKey] } else { "auto" }
+    if ($mode -in @("auto", "mainland", "overseas")) {
+        return $mode
+    }
+    return "auto"
+}
+
+function Set-GuguTransitRouteMode {
+    param([string]$Mode)
+    if ($Mode -notin @("auto", "mainland", "overseas")) {
+        throw "无效的仓库模式：$Mode"
+    }
+    Update-SyncRuleValue $GuguTransitRouteModeKey $Mode $LabConfigFile
+}
+
+function Resolve-GuguTransitRoute {
+    $mode = Get-GuguTransitRouteMode
+    if ($mode -eq "auto") {
+        $googleProbe = Test-GoogleReachability
+        if ($googleProbe.Success) { return "overseas" }
+        return "mainland"
+    }
+    return $mode
+}
+
+function Get-GuguTransitRouteLabel {
+    param([string]$Route)
+    if ($Route -eq "overseas") { return "海外 / GitHub" }
+    return "中国大陆 / Gitee"
+}
+
+function Get-GuguTransitRouteModeLabel {
+    $mode = Get-GuguTransitRouteMode
+    $routeLabel = Get-GuguTransitRouteLabel -Route (Resolve-GuguTransitRoute)
+    if ($mode -eq "auto") { return "自动（当前：$routeLabel）" }
+    return "手动：$routeLabel"
+}
+
+function Get-GuguTransitRepoUrl {
+    param(
+        [string]$Component,
+        [string]$Route
+    )
+
+    if ($Route -eq "overseas") {
+        if ($Component -eq "frontend") { return $GuguTransitExtGitHubRepo }
+        return $GuguTransitPluginGitHubRepo
+    }
+
+    if ($Component -eq "frontend") { return $GuguTransitExtGiteeRepo }
+    return $GuguTransitPluginGiteeRepo
+}
+
+function Show-GuguTransitRouteMenu {
+    while ($true) {
+        Clear-Host
+        Write-Header "切换中转管理仓库"
+        Write-Host "      当前模式: " -NoNewline
+        Write-Host (Get-GuguTransitRouteModeLabel) -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "      [01] " -NoNewline; Write-Host "自动选择" -ForegroundColor Cyan
+        Write-Host "      [02] " -NoNewline; Write-Host "中国大陆 / Gitee" -ForegroundColor Cyan
+        Write-Host "      [03] " -NoNewline; Write-Host "海外 / GitHub" -ForegroundColor Cyan
+        Write-Host "      [00] " -NoNewline; Write-Host "返回上一级" -ForegroundColor Cyan
+
+        $choice = Read-MenuPrompt -Allowed "0-3"
+        switch ($choice) {
+            "1" { Set-GuguTransitRouteMode -Mode "auto"; Write-Success "已切换为自动选择。"; Start-Sleep 1; return }
+            "2" { Set-GuguTransitRouteMode -Mode "mainland"; Write-Success "已切换为中国大陆 / Gitee。"; Start-Sleep 1; return }
+            "3" { Set-GuguTransitRouteMode -Mode "overseas"; Write-Success "已切换为海外 / GitHub。"; Start-Sleep 1; return }
+            "0" { return }
+            default { Write-Warning "输入无效，请按提示重试。"; Start-Sleep 1 }
+        }
+    }
+}
+
 function Get-GuguTransitStatus {
     $extReady = Test-Path (Join-Path $GuguTransitExtDir ".git")
     $pluginReady = Test-Path (Join-Path $GuguTransitPluginDir ".git")
@@ -2535,7 +2620,9 @@ function Get-GuguTransitStatus {
 function Install-GuguTransitManager {
     Clear-Host
     Write-Header "安装/更新咕咕助手 - 中转管理"
-    $selectedRoute = $null
+    $route = Resolve-GuguTransitRoute
+    $frontendRepoUrl = Get-GuguTransitRepoUrl -Component "frontend" -Route $route
+    $backendRepoUrl = Get-GuguTransitRepoUrl -Component "backend" -Route $route
     $serverPluginsEnabled = $false
 
     if (-not (Test-Path $ST_Dir)) {
@@ -2562,19 +2649,15 @@ function Install-GuguTransitManager {
         return
     }
 
-    $selectedRoute = Resolve-DownloadRoute -OperationName "部署 咕咕助手 - 中转管理" -GitUrl $GuguTransitExtRepo
-    if (-not $selectedRoute) {
-        Write-Error "未能为咕咕助手 - 中转管理选定可用下载线路。"
+    Write-Host "当前仓库: " -NoNewline
+    Write-Host (Get-GuguTransitRouteLabel -Route $route) -ForegroundColor Yellow
+
+    if (-not (Install-ManagedRepo -ProjectName "前端扩展" -RepoUrl $frontendRepoUrl -InstallDir $GuguTransitExtDir -RouteHost $null -DirectRepoUrl $frontendRepoUrl)) {
         Press-Any-Key
         return
     }
 
-    if (-not (Install-ManagedRepo -ProjectName "前端扩展" -RepoUrl $GuguTransitExtRepo -InstallDir $GuguTransitExtDir -RouteHost $selectedRoute.Host)) {
-        Press-Any-Key
-        return
-    }
-
-    if (-not (Install-ManagedRepo -ProjectName "后端插件" -RepoUrl $GuguTransitPluginRepo -InstallDir $GuguTransitPluginDir -RouteHost $selectedRoute.Host)) {
+    if (-not (Install-ManagedRepo -ProjectName "后端插件" -RepoUrl $backendRepoUrl -InstallDir $GuguTransitPluginDir -RouteHost $null -DirectRepoUrl $backendRepoUrl)) {
         Press-Any-Key
         return
     }
@@ -2632,6 +2715,8 @@ function Show-GuguTransitManagerMenu {
             "安装不完整" { Write-Host $status -ForegroundColor Yellow }
             default { Write-Host $status -ForegroundColor Red }
         }
+        Write-Host "      当前仓库: " -NoNewline
+        Write-Host (Get-GuguTransitRouteModeLabel) -ForegroundColor Yellow
 
         if (Test-Path (Join-Path $GuguTransitExtDir ".git")) {
             Write-Host "      前端版本: " -NoNewline
@@ -2647,13 +2732,15 @@ function Show-GuguTransitManagerMenu {
         if (($status -ne "未安装") -or (Test-Path $LegacyGuguTransitExtDir) -or (Test-Path $LegacyGuguTransitPluginDir)) {
             Write-Host "      [02] " -NoNewline; Write-Host "卸载" -ForegroundColor Red
         }
+        Write-Host "      [03] " -NoNewline; Write-Host "切换海内外仓库" -ForegroundColor Cyan
         Write-Host "      [00] " -NoNewline; Write-Host "返回上一级" -ForegroundColor Cyan
 
-        $allowedChoices = if (($status -eq "未安装") -and -not (Test-Path $LegacyGuguTransitExtDir) -and -not (Test-Path $LegacyGuguTransitPluginDir)) { "0/1" } else { "0-2" }
+        $allowedChoices = if (($status -eq "未安装") -and -not (Test-Path $LegacyGuguTransitExtDir) -and -not (Test-Path $LegacyGuguTransitPluginDir)) { "0/1/3" } else { "0-3" }
         $choice = Read-MenuPrompt -Allowed $allowedChoices
         switch ($choice) {
             "1" { Install-GuguTransitManager }
             "2" { Uninstall-GuguTransitManager }
+            "3" { Show-GuguTransitRouteMenu }
             "0" { return }
             default { Write-Warning "输入无效，请按提示重试。"; Start-Sleep 1 }
         }
