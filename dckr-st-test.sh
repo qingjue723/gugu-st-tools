@@ -12,7 +12,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-readonly SCRIPT_VERSION="v5.1299test"
+readonly SCRIPT_VERSION="v5.13test"
 GUGU_MODE="test"
 
 if [ "$GUGU_MODE" = "prod" ]; then
@@ -68,6 +68,10 @@ readonly AIS2API_OLD_IMAGE_REPO="ellinalopez/cloud-studio"
 readonly AIS2API_OLD_IMAGE="ellinalopez/cloud-studio:latest"
 readonly AIS2API_NEW_IMAGE_REPO="ghcr.io/ibuhub/aistudio-to-api"
 readonly AIS2API_NEW_IMAGE="ghcr.io/ibuhub/aistudio-to-api:latest"
+readonly ST_TRANSIT_FRONTEND_GITHUB_REPO="https://github.com/canaan723/gugu-transit-manager.git"
+readonly ST_TRANSIT_BACKEND_GITHUB_REPO="https://github.com/canaan723/gugu-transit-manager-plugin.git"
+readonly ST_TRANSIT_FRONTEND_GITEE_REPO="https://gitee.com/canaan723/gugu-transit-manager.git"
+readonly ST_TRANSIT_BACKEND_GITEE_REPO="https://gitee.com/canaan723/gugu-transit-manager-plugin.git"
 
 fn_init_user_home() {
     local target_user
@@ -1984,6 +1988,308 @@ fn_get_public_ip() {
     return 1
 }
 
+fn_st_detect_transit_route() {
+    if curl -s --connect-timeout 3 --max-time 5 https://www.google.com >/dev/null 2>&1; then
+        echo "overseas"
+    else
+        echo "mainland"
+    fi
+}
+
+fn_st_get_transit_route_label() {
+    local route="$1"
+    if [ "$route" = "overseas" ]; then
+        echo "海外 / GitHub"
+    else
+        echo "中国大陆 / Gitee"
+    fi
+}
+
+fn_st_get_transit_repo_url() {
+    local route="$1"
+    local component="$2"
+
+    if [ "$route" = "overseas" ]; then
+        if [ "$component" = "frontend" ]; then
+            echo "$ST_TRANSIT_FRONTEND_GITHUB_REPO"
+        else
+            echo "$ST_TRANSIT_BACKEND_GITHUB_REPO"
+        fi
+        return 0
+    fi
+
+    if [ "$component" = "frontend" ]; then
+        echo "$ST_TRANSIT_FRONTEND_GITEE_REPO"
+    else
+        echo "$ST_TRANSIT_BACKEND_GITEE_REPO"
+    fi
+}
+
+fn_st_get_transit_repo_state() {
+    local target_dir="$1"
+
+    if [ ! -d "$target_dir" ]; then
+        echo "missing"
+    elif [ ! -d "$target_dir/.git" ]; then
+        echo "invalid"
+    else
+        echo "installed"
+    fi
+}
+
+fn_st_get_transit_repo_state_label() {
+    local state="$1"
+
+    case "$state" in
+        installed) echo "已安装" ;;
+        invalid) echo "目录异常" ;;
+        *) echo "未安装" ;;
+    esac
+}
+
+fn_st_is_server_plugin_enabled() {
+    local config_file="$1"
+    grep -Eq '^[[:space:]]*enableServerPlugins:[[:space:]]*true([[:space:]]|$)' "$config_file"
+}
+
+fn_st_set_server_plugin_enabled() {
+    local config_file="$1"
+    local enabled="$2"
+    local target_value="false"
+
+    if [ "$enabled" = "true" ]; then
+        target_value="true"
+    fi
+
+    if grep -qE '^[[:space:]]*enableServerPlugins:' "$config_file"; then
+        sed -i -E "s/^([[:space:]]*)enableServerPlugins:.*/\1enableServerPlugins: ${target_value}/" "$config_file"
+    else
+        printf '\nenableServerPlugins: %s\n' "$target_value" >> "$config_file"
+    fi
+}
+
+fn_st_fix_repo_owner() {
+    local project_dir="$1"
+    local target_dir="$2"
+    local owner=""
+
+    owner=$(stat -c '%u:%g' "$project_dir" 2>/dev/null || true)
+    if [ -n "$owner" ]; then
+        chown -R "$owner" "$target_dir" >/dev/null 2>&1 || true
+    fi
+}
+
+fn_st_sync_transit_repo() {
+    local display_name="$1"
+    local target_dir="$2"
+    local repo_url="$3"
+    local project_dir="$4"
+
+    if [ ! -d "$target_dir" ]; then
+        log_action "正在安装${display_name}..."
+        if ! git clone --depth 1 "$repo_url" "$target_dir"; then
+            log_error "${display_name}安装失败，请检查网络或仓库地址。" || return 1
+        fi
+        fn_st_fix_repo_owner "$project_dir" "$target_dir"
+        return 0
+    fi
+
+    if [ ! -d "$target_dir/.git" ]; then
+        log_error "${display_name}目录已存在，但不是 Git 仓库：${target_dir}" || return 1
+    fi
+
+    if [ -n "$(git -C "$target_dir" status --porcelain 2>/dev/null)" ]; then
+        log_error "检测到${display_name}目录存在未提交修改，已停止更新：${target_dir}" || return 1
+    fi
+
+    log_action "正在更新${display_name}..."
+    git -C "$target_dir" remote set-url origin "$repo_url" >/dev/null 2>&1 || true
+    if ! git -C "$target_dir" fetch origin main --prune; then
+        log_error "${display_name}拉取远程信息失败。" || return 1
+    fi
+
+    if ! git -C "$target_dir" checkout main >/dev/null 2>&1; then
+        if ! git -C "$target_dir" checkout -B main origin/main >/dev/null 2>&1; then
+            log_error "${display_name}切换到 main 分支失败。" || return 1
+        fi
+    fi
+
+    if ! git -C "$target_dir" pull --ff-only origin main; then
+        log_error "${display_name}更新失败，请检查仓库状态。" || return 1
+    fi
+
+    fn_st_fix_repo_owner "$project_dir" "$target_dir"
+}
+
+fn_st_restart_sillytavern_service() {
+    local project_dir="$1"
+    local compose_cmd="$2"
+
+    log_action "正在重启酒馆以应用更改..."
+    if ! (cd "$project_dir" && $compose_cmd restart); then
+        log_error "酒馆重启失败，请手动检查容器状态。" || return 1
+    fi
+}
+
+fn_st_show_transit_status() {
+    local project_dir="$1"
+    local config_file="$2"
+    local route="$3"
+    local frontend_dir="${project_dir}/third-party/gugu-transit-manager"
+    local backend_dir="${project_dir}/plugins/gugu-transit-manager-plugin"
+    local frontend_state=""
+    local backend_state=""
+    local frontend_origin=""
+    local backend_origin=""
+
+    frontend_state=$(fn_st_get_transit_repo_state "$frontend_dir")
+    backend_state=$(fn_st_get_transit_repo_state "$backend_dir")
+    if [ "$frontend_state" = "installed" ]; then
+        frontend_origin=$(git -C "$frontend_dir" config --get remote.origin.url 2>/dev/null || true)
+    fi
+    if [ "$backend_state" = "installed" ]; then
+        backend_origin=$(git -C "$backend_dir" config --get remote.origin.url 2>/dev/null || true)
+    fi
+
+    echo -e "\n${CYAN}--- 中转管理插件状态 ---${NC}"
+    echo -e "线路来源: ${GREEN}$(fn_st_get_transit_route_label "$route")${NC}"
+    echo -e "前端扩展: ${YELLOW}$(fn_st_get_transit_repo_state_label "$frontend_state")${NC}"
+    echo -e "后端插件: ${YELLOW}$(fn_st_get_transit_repo_state_label "$backend_state")${NC}"
+    echo -e "后端开关: $(if fn_st_is_server_plugin_enabled "$config_file"; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi)"
+    echo -e "前端目录: ${CYAN}${frontend_dir}${NC}"
+    echo -e "后端目录: ${CYAN}${backend_dir}${NC}"
+    echo -e "前端源: ${CYAN}${frontend_origin:-未安装}${NC}"
+    echo -e "后端源: ${CYAN}${backend_origin:-未安装}${NC}"
+    echo -e "当前前端仓库: ${CYAN}$(fn_st_get_transit_repo_url "$route" frontend)${NC}"
+    echo -e "当前后端仓库: ${CYAN}$(fn_st_get_transit_repo_url "$route" backend)${NC}"
+}
+
+fn_st_toggle_transit_plugin_switch() {
+    local config_file="$1"
+    local compose_cmd="$2"
+    local project_dir="$3"
+
+    while true; do
+        tput reset
+        echo -e "${BLUE}=== 中转管理插件 · 后端插件开关 ===${NC}"
+        echo -ne "当前状态: "
+        if fn_st_is_server_plugin_enabled "$config_file"; then
+            echo -e "${GREEN}已开启${NC}"
+        else
+            echo -e "${RED}已关闭${NC}"
+        fi
+        echo -e "------------------------"
+        echo -e "  [1] 开启后端插件"
+        echo -e "  [2] 关闭后端插件"
+        echo -e "  [0] 返回上一级"
+        echo -e "------------------------"
+        read -rp "请输入选项: " switch_choice < /dev/tty
+        case "$switch_choice" in
+            1)
+                fn_st_set_server_plugin_enabled "$config_file" "true"
+                fn_st_restart_sillytavern_service "$project_dir" "$compose_cmd" || return 1
+                log_success "后端插件开关已开启并重启酒馆。"
+                read -rp "按 Enter 继续..." < /dev/tty
+                ;;
+            2)
+                fn_st_set_server_plugin_enabled "$config_file" "false"
+                fn_st_restart_sillytavern_service "$project_dir" "$compose_cmd" || return 1
+                log_success "后端插件开关已关闭并重启酒馆。"
+                read -rp "按 Enter 继续..." < /dev/tty
+                ;;
+            0) break ;;
+            *) log_warn "无效输入"; sleep 1 ;;
+        esac
+    done
+}
+
+fn_st_transit_manager() {
+    local project_dir="$1"
+    local config_file="$2"
+    local compose_cmd="$3"
+    local frontend_dir="${project_dir}/third-party/gugu-transit-manager"
+    local backend_dir="${project_dir}/plugins/gugu-transit-manager-plugin"
+
+    fn_check_base_deps
+
+    while true; do
+        local route=""
+        local frontend_state=""
+        local backend_state=""
+        local overall_state=""
+        route=$(fn_st_detect_transit_route)
+        frontend_state=$(fn_st_get_transit_repo_state "$frontend_dir")
+        backend_state=$(fn_st_get_transit_repo_state "$backend_dir")
+
+        if [[ "$frontend_state" == "invalid" || "$backend_state" == "invalid" ]]; then
+            overall_state="Git 仓库异常"
+        elif [[ "$frontend_state" == "missing" && "$backend_state" == "missing" ]]; then
+            overall_state="未安装"
+        elif [[ "$frontend_state" == "installed" && "$backend_state" == "installed" ]]; then
+            if fn_st_is_server_plugin_enabled "$config_file"; then
+                overall_state="已安装"
+            else
+                overall_state="已安装（开关未开启）"
+            fi
+        else
+            overall_state="安装不完整"
+        fi
+
+        tput reset
+        echo -e "${BLUE}=== 中转管理插件 ===${NC}"
+        echo -e "项目路径: ${CYAN}${project_dir}${NC}"
+        echo -e "线路来源: ${GREEN}$(fn_st_get_transit_route_label "$route")${NC}"
+        echo -e "当前状态: ${YELLOW}${overall_state}${NC}"
+        echo -e "------------------------"
+        echo -e "  [1] 安装/更新插件"
+        echo -e "  [2] 查看插件状态"
+        echo -e "  [3] 管理后端插件开关"
+        echo -e "  [4] 重启酒馆"
+        echo -e "  [5] 卸载插件"
+        echo -e "  [0] 返回上一级"
+        echo -e "------------------------"
+        read -rp "请输入选项: " transit_choice < /dev/tty
+        case "$transit_choice" in
+            1)
+                fn_st_sync_transit_repo "前端扩展" "$frontend_dir" "$(fn_st_get_transit_repo_url "$route" frontend)" "$project_dir" || { read -rp "按 Enter 继续..." < /dev/tty; continue; }
+                fn_st_sync_transit_repo "后端插件" "$backend_dir" "$(fn_st_get_transit_repo_url "$route" backend)" "$project_dir" || { read -rp "按 Enter 继续..." < /dev/tty; continue; }
+                if ! fn_st_is_server_plugin_enabled "$config_file"; then
+                    fn_st_set_server_plugin_enabled "$config_file" "true"
+                    log_success "已自动开启后端插件开关。"
+                fi
+                fn_st_restart_sillytavern_service "$project_dir" "$compose_cmd" || { read -rp "按 Enter 继续..." < /dev/tty; continue; }
+                log_success "中转管理插件已安装或更新完成。"
+                read -rp "按 Enter 继续..." < /dev/tty
+                ;;
+            2)
+                fn_st_show_transit_status "$project_dir" "$config_file" "$route"
+                read -rp "按 Enter 继续..." < /dev/tty
+                ;;
+            3)
+                fn_st_toggle_transit_plugin_switch "$config_file" "$compose_cmd" "$project_dir"
+                ;;
+            4)
+                fn_st_restart_sillytavern_service "$project_dir" "$compose_cmd"
+                read -rp "按 Enter 继续..." < /dev/tty
+                ;;
+            5)
+                echo -e "\n${RED}警告：此操作将移除中转管理插件的前端扩展和后端插件目录。${NC}"
+                read -rp "确定继续吗？[y/N]: " confirm_uninstall < /dev/tty
+                if [[ "$confirm_uninstall" =~ ^[Yy]$ ]]; then
+                    rm -rf "$frontend_dir" "$backend_dir"
+                    fn_st_restart_sillytavern_service "$project_dir" "$compose_cmd" || { read -rp "按 Enter 继续..." < /dev/tty; continue; }
+                    log_success "中转管理插件已卸载。若没有其他后端插件，可按需关闭 enableServerPlugins。"
+                else
+                    log_info "操作已取消。"
+                fi
+                read -rp "按 Enter 继续..." < /dev/tty
+                ;;
+            0) break ;;
+            *) log_warn "无效输入"; sleep 1 ;;
+        esac
+    done
+}
+
 fn_generate_password() {
     local length=${1:-34}
     tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$length"
@@ -3810,6 +4116,7 @@ fn_st_docker_manager() {
         echo -e "  [8] 查看实时日志 (logs -f)"
         echo -e "  [9] ${CYAN}代理配置管理${NC}"
         echo -e "  [10] ${CYAN}Host 白名单域名管理${NC}"
+        echo -e "  [11] ${CYAN}中转管理插件${NC}"
         echo -e "  [x] 彻底卸载酒馆"
         echo -e "  [0] 返回上一级"
         echo -e "------------------------"
@@ -3869,6 +4176,9 @@ fn_st_docker_manager() {
                 ;;
             10)
                 fn_st_host_whitelist_manager "$project_dir" "$config_file" "$compose_cmd"
+                ;;
+            11)
+                fn_st_transit_manager "$project_dir" "$config_file" "$compose_cmd"
                 ;;
             x|X)
                 if fn_uninstall_docker_app "sillytavern" "SillyTavern" "$project_dir" "ghcr.io/sillytavern/sillytavern:latest"; then
