@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2025 清绝 (QingJue) <blog.qjyg.de>
+# Copyright (c) 2025 清绝 (QingJue) <blog.qjyg.de>
 # This script is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License.
 # To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-sa/4.0/
 #
@@ -7,7 +7,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-$ScriptVersion = "v5.20"
+$ScriptVersion = "v5.21"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -2496,6 +2496,30 @@ function Remove-ManagedDirectoryLink {
     }
 }
 
+function Write-GuguTransitInstallMarker {
+    $markerPath = Join-Path $GuguTransitExtDir '.install-marker.json'
+    $markerDir = Split-Path -Path $markerPath -Parent
+    if (-not (Test-Path $markerDir)) {
+        New-Item -Path $markerDir -ItemType Directory -Force | Out-Null
+    }
+
+    $frontendCommit = ''
+    $backendCommit = ''
+    if (Test-Path (Join-Path $GuguTransitExtDir '.git')) {
+        $frontendCommit = (& git -C $GuguTransitExtDir rev-parse --short HEAD 2>$null | Out-String).Trim()
+    }
+    if (Test-Path (Join-Path $GuguTransitPluginDir '.git')) {
+        $backendCommit = (& git -C $GuguTransitPluginDir rev-parse --short HEAD 2>$null | Out-String).Trim()
+    }
+
+    $payload = [ordered]@{
+        installedAt = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
+        frontend = [ordered]@{ commit = $frontendCommit }
+        backend = [ordered]@{ commit = $backendCommit }
+    }
+    $json = $payload | ConvertTo-Json -Depth 4
+    [System.IO.File]::WriteAllText($markerPath, $json, [System.Text.UTF8Encoding]::new($false))
+}
 function Get-GuguTransitStatus {
     $extReady = Test-Path (Join-Path $GuguTransitExtDir ".git")
     $pluginReady = Test-Path (Join-Path $GuguTransitPluginDir ".git")
@@ -2556,6 +2580,7 @@ function Install-GuguTransitManager {
     }
 
     $serverPluginsEnabled = (Get-STConfigValue "enableServerPlugins") -eq "true"
+    Write-GuguTransitInstallMarker
     if (-not $serverPluginsEnabled) {
         Update-STConfigValue "enableServerPlugins" "true" | Out-Null
         Write-Warning "检测到酒馆后端插件原本未开启，已自动开启。"
@@ -3416,3 +3441,4 @@ while ($true) {
         default { Write-Warning "输入无效，请按提示重试。"; Start-Sleep -Seconds 1.5 }
     }
 }
+

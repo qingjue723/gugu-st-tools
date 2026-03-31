@@ -79,7 +79,7 @@ GIT_LAST_LOG_FILE=""
 PKG_NONINTERACTIVE_NOTICE_SHOWN="false"
 
 fn_show_main_header() {
-    echo -e "    ${YELLOW}>>${GREEN} 清绝咕咕助手 v5.191${NC}"
+    echo -e "    ${YELLOW}>>${GREEN} 清绝咕咕助手 v5.192${NC}"
     echo -e "       ${BOLD}\033[0;37m作者: 清绝 | 网址: blog.qjyg.de${NC}"
     echo -e "    ${RED}本脚本为免费工具，严禁用于商业倒卖！${NC}"
 }
@@ -2530,6 +2530,34 @@ fn_remove_managed_link() {
     rm -f "$target_dir"
 }
 
+fn_write_gugu_transit_install_marker() {
+    local frontend_commit backend_commit marker_path marker_dir
+
+    marker_path="$GUGU_TRANSIT_EXT_DIR/.install-marker.json"
+    marker_dir="$(dirname "$marker_path")"
+    mkdir -p "$marker_dir"
+
+    frontend_commit=""
+    backend_commit=""
+    if [ -d "$GUGU_TRANSIT_EXT_DIR/.git" ]; then
+        frontend_commit="$(git -C "$GUGU_TRANSIT_EXT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+    fi
+    if [ -d "$GUGU_TRANSIT_PLUGIN_DIR/.git" ]; then
+        backend_commit="$(git -C "$GUGU_TRANSIT_PLUGIN_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+    fi
+
+    cat > "$marker_path" <<EOF
+{
+  "installedAt": $(date +%s000),
+  "frontend": {
+    "commit": "${frontend_commit}"
+  },
+  "backend": {
+    "commit": "${backend_commit}"
+  }
+}
+EOF
+}
 fn_get_gugu_transit_status() {
     local ext_ready=false
     local plugin_ready=false
@@ -2595,6 +2623,7 @@ fn_install_gugu_transit_manager() {
     fi
 
     current_server_plugins="$(fn_get_st_config_value "enableServerPlugins")"
+    fn_write_gugu_transit_install_marker
     if [[ "$current_server_plugins" != "true" ]]; then
         fn_update_st_config_value "enableServerPlugins" "true" >/dev/null 2>&1 || true
         fn_print_warning "检测到酒馆后端插件原本未开启，已自动开启。"
@@ -3188,11 +3217,12 @@ while true; do
     fi
 
     echo -e "\n    选择一个操作来开始：\n"
-    printf "      "; fn_print_menu_cell "$SOFT_ROSE" 1 "启动酒馆"; fn_print_menu_cell "$SOFT_AQUA" 2 "数据同步"; fn_print_menu_cell "$SOFT_GOLD" 3 "本地备份"; printf "\n"
-    printf "      "; fn_print_menu_cell "$SOFT_PEACH" 4 "首次部署"; fn_print_menu_cell "$SOFT_LAVENDER" 5 "酒馆版本管理"; fn_print_menu_cell "$SOFT_MINT" 6 "更新咕咕助手${update_notice}"; printf "\n"
-    printf "      "; fn_print_menu_cell "$SOFT_SKY" 7 "管理助手自启"; fn_print_menu_cell "$SOFT_LILAC" 8 "查看帮助文档"; fn_print_menu_cell "$SOFT_CORAL" 9 "配置网络代理"; printf "\n"
-    printf "      "; fn_print_menu_cell "$MAGENTA" 10 "实验室"; fn_print_menu_cell "$CYAN" 11 "酒馆配置管理"; fn_print_menu_cell "$GREEN" 12 "咕咕宝箱"; printf "\n\n"
-    printf "      %b[00] 退出咕咕助手%b\n\n" "$SOFT_PINK_RED" "$NC"
+    printf "      "; fn_print_menu_cell "$SOFT_ROSE" 1 "启动酒馆"; fn_print_menu_cell "$SOFT_AQUA" 2 "数据同步"; printf "\n"
+    printf "      "; fn_print_menu_cell "$SOFT_GOLD" 3 "本地备份"; fn_print_menu_cell "$SOFT_PEACH" 4 "首次部署"; printf "\n"
+    printf "      "; fn_print_menu_cell "$SOFT_LAVENDER" 5 "酒馆版本管理"; fn_print_menu_cell "$SOFT_MINT" 6 "更新咕咕助手${update_notice}"; printf "\n"
+    printf "      "; fn_print_menu_cell "$SOFT_SKY" 7 "管理助手自启"; fn_print_menu_cell "$SOFT_LILAC" 8 "查看帮助文档"; printf "\n"
+    printf "      "; fn_print_menu_cell "$SOFT_CORAL" 9 "配置网络代理"; fn_print_menu_cell "$MAGENTA" 10 "实验室"; printf "\n"
+    printf "      "; fn_print_menu_cell "$CYAN" 11 "酒馆配置管理"; fn_print_menu_cell "$GREEN" 12 "咕咕宝箱"; printf "\n\n"
     choice="$(fn_read_menu_prompt "0-12")"
 
     case $choice in
@@ -3212,3 +3242,4 @@ while true; do
         *) fn_print_warning "输入无效，请按提示重试。"; sleep 1.5 ;;
     esac
 done
+
