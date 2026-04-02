@@ -64,14 +64,17 @@ fi
 
 CUSTOM_PROXY_IMAGE=""
 USER_HOME=""
+readonly SOURCE_MANIFEST_URL="https://gugu.qjyg.de/source-manifest.json"
+readonly FIRST_PARTY_SCRIPT_KEY="dckr_st_test"
+SOURCE_MANIFEST_CONTENT=""
+SOURCE_PROVIDER=""
+SCRIPT_DOWNLOAD_URL=""
 readonly AIS2API_OLD_IMAGE_REPO="ellinalopez/cloud-studio"
 readonly AIS2API_OLD_IMAGE="ellinalopez/cloud-studio:latest"
 readonly AIS2API_NEW_IMAGE_REPO="ghcr.io/ibuhub/aistudio-to-api"
 readonly AIS2API_NEW_IMAGE="ghcr.io/ibuhub/aistudio-to-api:latest"
-readonly ST_TRANSIT_FRONTEND_GITHUB_REPO="https://github.com/canaan723/gugu-transit-manager.git"
-readonly ST_TRANSIT_BACKEND_GITHUB_REPO="https://github.com/canaan723/gugu-transit-manager-plugin.git"
-readonly ST_TRANSIT_FRONTEND_GITEE_REPO="https://gitee.com/canaan723/gugu-transit-manager.git"
-readonly ST_TRANSIT_BACKEND_GITEE_REPO="https://gitee.com/canaan723/gugu-transit-manager-plugin.git"
+ST_TRANSIT_FRONTEND_REPO_URL=""
+ST_TRANSIT_BACKEND_REPO_URL=""
 
 fn_init_user_home() {
     local target_user
@@ -240,14 +243,61 @@ log_action() { echo -e "${YELLOW}[ACTION] $1${NC}"; }
 log_step() { echo -e "\n${BLUE}--- $1: $2 ---${NC}"; }
 log_success() { echo -e "${GREEN}✓ $1${NC}"; }
 
+fn_fetch_source_manifest() {
+    if [[ -n "$SOURCE_MANIFEST_CONTENT" ]]; then
+        return 0
+    fi
+
+    local content
+    if ! content="$(curl -fsSL --connect-timeout 10 "$SOURCE_MANIFEST_URL")"; then
+        log_error "无法获取发布源清单：$SOURCE_MANIFEST_URL" || return 1
+    fi
+
+    SOURCE_MANIFEST_CONTENT="$(printf '%s' "$content" | tr -d '\r\n')"
+    if [[ -z "$SOURCE_MANIFEST_CONTENT" ]]; then
+        log_error "发布源清单内容为空。" || return 1
+    fi
+}
+
+fn_get_manifest_value() {
+    local key="$1"
+    local value
+
+    fn_fetch_source_manifest || return 1
+    value="$(printf '%s' "$SOURCE_MANIFEST_CONTENT" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")"
+    if [[ -z "$value" ]]; then
+        log_error "发布源清单缺少字段：$key" || return 1
+    fi
+
+    printf '%s' "$value"
+}
+
+fn_load_first_party_sources() {
+    if [[ -n "$SCRIPT_DOWNLOAD_URL" && -n "$ST_TRANSIT_FRONTEND_REPO_URL" && -n "$ST_TRANSIT_BACKEND_REPO_URL" && -n "$SOURCE_PROVIDER" ]]; then
+        return 0
+    fi
+
+    local provider script_url frontend_repo backend_repo
+    provider="$(fn_get_manifest_value "provider")" || return 1
+    script_url="$(fn_get_manifest_value "$FIRST_PARTY_SCRIPT_KEY")" || return 1
+    frontend_repo="$(fn_get_manifest_value "gugu_transit_manager")" || return 1
+    backend_repo="$(fn_get_manifest_value "gugu_transit_manager_plugin")" || return 1
+
+    SOURCE_PROVIDER="$provider"
+    SCRIPT_DOWNLOAD_URL="$script_url"
+    ST_TRANSIT_FRONTEND_REPO_URL="$frontend_repo"
+    ST_TRANSIT_BACKEND_REPO_URL="$backend_repo"
+}
+
 # --- [核心功能] 自安装、自更新与卸载 ---
 fn_auto_install() {
     # 如果当前运行路径不是目标路径，则执行安装
     if [[ "$0" != "$GUGU_PATH" ]]; then
         log_info "正在将脚本安装到系统路径 ($GUGU_PATH)..."
+        fn_load_first_party_sources || return 1
         if [[ "$0" == "/dev/fd/"* ]] || [[ "$0" == "-" ]] || [[ ! -f "$0" ]]; then
             # 处理通过 curl | bash 或进程替换运行的情况
-            if ! curl -sL "$GUGU_URL" -o "$GUGU_PATH"; then
+            if ! curl -sL "$SCRIPT_DOWNLOAD_URL" -o "$GUGU_PATH"; then
                 log_error "安装失败：无法从网络下载脚本。" || return 1
             fi
         else
@@ -263,16 +313,20 @@ fn_check_update() {
     [[ "$0" != "$GUGU_PATH" ]] && return
 
     log_info "正在检查版本更新..."
+    if ! fn_load_first_party_sources; then
+        log_warn "已跳过更新检查：发布源清单不可用。"
+        return
+    fi
     # 获取远程版本号 (匹配 readonly SCRIPT_VERSION="xxx")
     local remote_version
-    remote_version=$(curl -sL "$GUGU_URL" | grep -oP 'readonly SCRIPT_VERSION="\K[^"]+' | head -n 1)
+    remote_version=$(curl -sL "$SCRIPT_DOWNLOAD_URL" | grep -oP 'readonly SCRIPT_VERSION="\K[^"]+' | head -n 1)
     
     if [ -n "$remote_version" ] && [ "$remote_version" != "$SCRIPT_VERSION" ]; then
         echo -e "${YELLOW}[更新提示] 发现新版本: ${GREEN}$remote_version${NC} (当前: $SCRIPT_VERSION)"
         read -rp "是否立即升级到最新版本？[Y/n]: " confirm_update < /dev/tty
         if [[ "${confirm_update:-y}" =~ ^[Yy]$ ]]; then
             log_action "正在下载并应用更新..."
-            if curl -sL "$GUGU_URL" -o "$GUGU_PATH"; then
+            if curl -sL "$SCRIPT_DOWNLOAD_URL" -o "$GUGU_PATH"; then
                 log_success "更新成功！正在重启脚本..."
                 sleep 1
                 exec bash "$GUGU_PATH"
@@ -1989,39 +2043,35 @@ fn_get_public_ip() {
 }
 
 fn_st_detect_transit_route() {
-    if curl -s --connect-timeout 3 --max-time 5 https://www.google.com >/dev/null 2>&1; then
-        echo "overseas"
-    else
-        echo "mainland"
+    if ! fn_load_first_party_sources; then
+        echo "unknown"
+        return
     fi
+
+    echo "$SOURCE_PROVIDER"
 }
 
 fn_st_get_transit_route_label() {
     local route="$1"
-    if [ "$route" = "overseas" ]; then
-        echo "海外 / GitHub"
-    else
-        echo "中国大陆 / Gitee"
-    fi
+    case "$route" in
+        github) echo "GitHub" ;;
+        gitee) echo "Gitee" ;;
+        *) echo "未知" ;;
+    esac
 }
 
 fn_st_get_transit_repo_url() {
     local route="$1"
     local component="$2"
 
-    if [ "$route" = "overseas" ]; then
-        if [ "$component" = "frontend" ]; then
-            echo "$ST_TRANSIT_FRONTEND_GITHUB_REPO"
-        else
-            echo "$ST_TRANSIT_BACKEND_GITHUB_REPO"
-        fi
-        return 0
+    if ! fn_load_first_party_sources; then
+        return 1
     fi
 
     if [ "$component" = "frontend" ]; then
-        echo "$ST_TRANSIT_FRONTEND_GITEE_REPO"
+        echo "$ST_TRANSIT_FRONTEND_REPO_URL"
     else
-        echo "$ST_TRANSIT_BACKEND_GITEE_REPO"
+        echo "$ST_TRANSIT_BACKEND_REPO_URL"
     fi
 }
 

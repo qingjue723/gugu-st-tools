@@ -13,7 +13,11 @@ $ScriptVersion = "v5.23"
 $OutputEncoding = [System.Text.Encoding]::UTF8
 try { Add-Type -AssemblyName System.Net.Http } catch {}
 
-$ScriptSelfUpdateUrl = "https://gitee.com/canaan723/st-tools/raw/main/jiuguan/pc-st.ps1"
+$SourceManifestUrl = "https://gugu.qjyg.de/source-manifest.json"
+$FirstPartyScriptKey = "pc_st"
+$script:SourceManifest = $null
+$script:SourceProvider = $null
+$script:ScriptSelfUpdateUrl = $null
 $HelpDocsUrl = "https://blog.qjyg.de"
 $ScriptBaseDir = Split-Path -Path $PSCommandPath -Parent
 $ST_Dir = Join-Path $ScriptBaseDir "SillyTavern"
@@ -44,10 +48,8 @@ $SyncRulesConfigFile = Join-Path $ConfigDir "sync_rules.conf"
 $AgreementFile = Join-Path $ConfigDir ".agreement_shown"
 $LabConfigFile = Join-Path $ConfigDir "lab.conf"
 $GcliDir = Join-Path $ScriptBaseDir "gcli2api"
-$GuguTransitExtGitHubRepo = "https://github.com/canaan723/gugu-transit-manager.git"
-$GuguTransitPluginGitHubRepo = "https://github.com/canaan723/gugu-transit-manager-plugin.git"
-$GuguTransitExtGiteeRepo = "https://gitee.com/canaan723/gugu-transit-manager.git"
-$GuguTransitPluginGiteeRepo = "https://gitee.com/canaan723/gugu-transit-manager-plugin.git"
+$script:GuguTransitExtRepoUrl = $null
+$script:GuguTransitPluginRepoUrl = $null
 $GuguTransitRouteModeKey = "GUGU_TRANSIT_ROUTE_MODE"
 $GuguTransitExtTarget = Join-Path $ST_Dir "public/scripts/extensions/third-party/gugu-transit-manager"
 $GuguTransitPluginTarget = Join-Path $ST_Dir "plugins/gugu-transit-manager-plugin"
@@ -99,6 +101,64 @@ $SoftLavender = "$([char]27)[38;5;183m"
 $SoftLilac = "$([char]27)[38;5;177m"
 $SoftCoral = "$([char]27)[38;5;216m"
 $SoftPinkRed = "$([char]27)[38;5;211m"
+
+function Get-SourceManifest {
+    if ($null -ne $script:SourceManifest) {
+        return $script:SourceManifest
+    }
+
+    try {
+        $content = (Invoke-WebRequest -Uri $SourceManifestUrl -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop).Content
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            throw "清单内容为空。"
+        }
+        $script:SourceManifest = $content | ConvertFrom-Json -ErrorAction Stop
+        return $script:SourceManifest
+    } catch {
+        throw "无法获取发布源清单：$($_.Exception.Message)"
+    }
+}
+
+function Get-RequiredManifestValue {
+    param(
+        [string]$Section,
+        [Parameter(Mandatory=$true)][string]$Key
+    )
+
+    $manifest = Get-SourceManifest
+    if ([string]::IsNullOrWhiteSpace($Section)) {
+        $value = [string]$manifest.$Key
+    } else {
+        $container = $manifest.$Section
+        if ($null -eq $container) {
+            throw "发布源清单缺少区块：$Section"
+        }
+        $value = [string]$container.$Key
+    }
+
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        if ([string]::IsNullOrWhiteSpace($Section)) {
+            throw "发布源清单缺少字段：$Key"
+        }
+        throw "发布源清单缺少字段：$Section.$Key"
+    }
+
+    return $value
+}
+
+function Initialize-FirstPartySources {
+    if (-not [string]::IsNullOrWhiteSpace($script:ScriptSelfUpdateUrl) -and
+        -not [string]::IsNullOrWhiteSpace($script:GuguTransitExtRepoUrl) -and
+        -not [string]::IsNullOrWhiteSpace($script:GuguTransitPluginRepoUrl) -and
+        -not [string]::IsNullOrWhiteSpace($script:SourceProvider)) {
+        return
+    }
+
+    $script:SourceProvider = Get-RequiredManifestValue -Key "provider"
+    $script:ScriptSelfUpdateUrl = Get-RequiredManifestValue -Section "raw" -Key $FirstPartyScriptKey
+    $script:GuguTransitExtRepoUrl = Get-RequiredManifestValue -Section "repos" -Key "gugu_transit_manager"
+    $script:GuguTransitPluginRepoUrl = Get-RequiredManifestValue -Section "repos" -Key "gugu_transit_manager_plugin"
+}
 
 function Get-DisplayWidth {
     param([string]$Text)
@@ -2527,44 +2587,28 @@ function Write-GuguTransitInstallMarker {
     [System.IO.File]::WriteAllText($markerPath, $json, [System.Text.UTF8Encoding]::new($false))
 }
 
-function Get-GuguTransitRouteMode {
-    $labConfig = Parse-ConfigFile $LabConfigFile
-    $mode = if ($labConfig.ContainsKey($GuguTransitRouteModeKey)) { $labConfig[$GuguTransitRouteModeKey] } else { "auto" }
-    if ($mode -in @("auto", "mainland", "overseas")) {
-        return $mode
-    }
-    return "auto"
-}
-
-function Set-GuguTransitRouteMode {
-    param([string]$Mode)
-    if ($Mode -notin @("auto", "mainland", "overseas")) {
-        throw "无效的仓库模式：$Mode"
-    }
-    Update-SyncRuleValue $GuguTransitRouteModeKey $Mode $LabConfigFile
-}
-
 function Resolve-GuguTransitRoute {
-    $mode = Get-GuguTransitRouteMode
-    if ($mode -eq "auto") {
-        $googleProbe = Test-GoogleReachability
-        if ($googleProbe.Success) { return "overseas" }
-        return "mainland"
+    try {
+        Initialize-FirstPartySources
+        return $script:SourceProvider
+    } catch {
+        return "unknown"
     }
-    return $mode
 }
 
 function Get-GuguTransitRouteLabel {
     param([string]$Route)
-    if ($Route -eq "overseas") { return "海外 / GitHub" }
-    return "中国大陆 / Gitee"
+    switch ($Route) {
+        "github" { return "GitHub" }
+        "gitee" { return "Gitee" }
+        default { return "未知" }
+    }
 }
 
 function Get-GuguTransitRouteModeLabel {
-    $mode = Get-GuguTransitRouteMode
     $routeLabel = Get-GuguTransitRouteLabel -Route (Resolve-GuguTransitRoute)
-    if ($mode -eq "auto") { return "自动（当前：$routeLabel）" }
-    return "手动：$routeLabel"
+    if ($routeLabel -eq "未知") { return "跟随服务器（当前不可用）" }
+    return "跟随服务器（当前：$routeLabel）"
 }
 
 function Get-GuguTransitRepoUrl {
@@ -2573,36 +2617,19 @@ function Get-GuguTransitRepoUrl {
         [string]$Route
     )
 
-    if ($Route -eq "overseas") {
-        if ($Component -eq "frontend") { return $GuguTransitExtGitHubRepo }
-        return $GuguTransitPluginGitHubRepo
-    }
-
-    if ($Component -eq "frontend") { return $GuguTransitExtGiteeRepo }
-    return $GuguTransitPluginGiteeRepo
+    Initialize-FirstPartySources
+    if ($Component -eq "frontend") { return $script:GuguTransitExtRepoUrl }
+    return $script:GuguTransitPluginRepoUrl
 }
 
 function Show-GuguTransitRouteMenu {
-    while ($true) {
-        Clear-Host
-        Write-Header "切换中转管理仓库"
-        Write-Host "      当前模式: " -NoNewline
-        Write-Host (Get-GuguTransitRouteModeLabel) -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "      [01] " -NoNewline; Write-Host "自动选择" -ForegroundColor Cyan
-        Write-Host "      [02] " -NoNewline; Write-Host "中国大陆 / Gitee" -ForegroundColor Cyan
-        Write-Host "      [03] " -NoNewline; Write-Host "海外 / GitHub" -ForegroundColor Cyan
-        Write-Host "      [00] " -NoNewline; Write-Host "返回上一级" -ForegroundColor Cyan
-
-        $choice = Read-MenuPrompt -Allowed "0-3"
-        switch ($choice) {
-            "1" { Set-GuguTransitRouteMode -Mode "auto"; Write-Success "已切换为自动选择。"; Start-Sleep 1; return }
-            "2" { Set-GuguTransitRouteMode -Mode "mainland"; Write-Success "已切换为中国大陆 / Gitee。"; Start-Sleep 1; return }
-            "3" { Set-GuguTransitRouteMode -Mode "overseas"; Write-Success "已切换为海外 / GitHub。"; Start-Sleep 1; return }
-            "0" { return }
-            default { Write-Warning "输入无效，请按提示重试。"; Start-Sleep 1 }
-        }
-    }
+    Clear-Host
+    Write-Header "当前发布源"
+    Write-Host "      第一方仓库现已统一跟随服务器发布源。"
+    Write-Host "      当前来源: " -NoNewline
+    Write-Host (Get-GuguTransitRouteModeLabel) -ForegroundColor Yellow
+    Write-Host "      如需切回 GitHub，只需要在服务器端调整 source-manifest.json。"
+    Press-Any-Key
 }
 
 function Get-GuguTransitStatus {
@@ -2620,10 +2647,18 @@ function Get-GuguTransitStatus {
 function Install-GuguTransitManager {
     Clear-Host
     Write-Header "安装/更新咕咕助手 - 中转管理"
-    $route = Resolve-GuguTransitRoute
-    $frontendRepoUrl = Get-GuguTransitRepoUrl -Component "frontend" -Route $route
-    $backendRepoUrl = Get-GuguTransitRepoUrl -Component "backend" -Route $route
     $serverPluginsEnabled = $false
+
+    try {
+        Initialize-FirstPartySources
+        $route = Resolve-GuguTransitRoute
+        $frontendRepoUrl = Get-GuguTransitRepoUrl -Component "frontend" -Route $route
+        $backendRepoUrl = Get-GuguTransitRepoUrl -Component "backend" -Route $route
+    } catch {
+        Write-Error $_.Exception.Message
+        Press-Any-Key
+        return
+    }
 
     if (-not (Test-Path $ST_Dir)) {
         Write-Error "未检测到酒馆目录，请先完成首次部署。"
@@ -2732,7 +2767,7 @@ function Show-GuguTransitManagerMenu {
         if (($status -ne "未安装") -or (Test-Path $LegacyGuguTransitExtDir) -or (Test-Path $LegacyGuguTransitPluginDir)) {
             Write-Host "      [02] " -NoNewline; Write-Host "卸载" -ForegroundColor Red
         }
-        Write-Host "      [03] " -NoNewline; Write-Host "切换海内外仓库" -ForegroundColor Cyan
+        Write-Host "      [03] " -NoNewline; Write-Host "查看当前发布源" -ForegroundColor Cyan
         Write-Host "      [00] " -NoNewline; Write-Host "返回上一级" -ForegroundColor Cyan
 
         $allowedChoices = if (($status -eq "未安装") -and -not (Test-Path $LegacyGuguTransitExtDir) -and -not (Test-Path $LegacyGuguTransitPluginDir)) { "0/1/3" } else { "0-3" }
@@ -3430,6 +3465,7 @@ function Update-AssistantScript {
 
     Write-Warning "正在从服务器获取最新版本..."
     try {
+        Initialize-FirstPartySources
         $newScriptContent = (Invoke-WebRequest -Uri $ScriptSelfUpdateUrl -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop).Content
         if ([string]::IsNullOrWhiteSpace($newScriptContent)) { Write-ErrorExit "下载失败：脚本内容为空！" }
 
@@ -3492,7 +3528,10 @@ function Check-ForUpdatesOnStart {
             }
         } catch {}
     }
-    Start-Job -ScriptBlock $jobScriptBlock -ArgumentList $ScriptSelfUpdateUrl, $UpdateFlagFile, $PSCommandPath | Out-Null
+    try {
+        Initialize-FirstPartySources
+        Start-Job -ScriptBlock $jobScriptBlock -ArgumentList $ScriptSelfUpdateUrl, $UpdateFlagFile, $PSCommandPath | Out-Null
+    } catch {}
 }
 
 Apply-Proxy

@@ -35,7 +35,11 @@ BACKUP_ROOT_DIR="$HOME/SillyTavern_Backups"
 REPO_BRANCH="release"
 BACKUP_LIMIT=10
 SCRIPT_SELF_PATH=$(readlink -f "$0")
-SCRIPT_URL="https://gitee.com/canaan723/st-tools/raw/main/ad-st.sh"
+readonly SOURCE_MANIFEST_URL="https://gugu.qjyg.de/source-manifest.json"
+readonly FIRST_PARTY_SCRIPT_KEY="ad_st_test"
+SOURCE_MANIFEST_CONTENT=""
+SOURCE_PROVIDER=""
+SCRIPT_URL=""
 UPDATE_FLAG_FILE="/data/data/com.termux/files/usr/tmp/.st_assistant_update_flag"
 
 CONFIG_DIR="$HOME/.config/ad-st"
@@ -48,11 +52,9 @@ AGREEMENT_FILE="$CONFIG_DIR/.agreement_shown"
 
 GCLI_DIR="$HOME/gcli2api"
 SCRIPT_BASE_DIR="$(dirname "$SCRIPT_SELF_PATH")"
-GUGU_TRANSIT_EXT_GITHUB_REPO="https://github.com/canaan723/gugu-transit-manager.git"
-GUGU_TRANSIT_PLUGIN_GITHUB_REPO="https://github.com/canaan723/gugu-transit-manager-plugin.git"
-GUGU_TRANSIT_EXT_GITEE_REPO="https://gitee.com/canaan723/gugu-transit-manager.git"
-GUGU_TRANSIT_PLUGIN_GITEE_REPO="https://gitee.com/canaan723/gugu-transit-manager-plugin.git"
 GUGU_TRANSIT_ROUTE_MODE_KEY="GUGU_TRANSIT_ROUTE_MODE"
+GUGU_TRANSIT_EXT_REPO_URL=""
+GUGU_TRANSIT_PLUGIN_REPO_URL=""
 GUGU_TRANSIT_EXT_TARGET="$ST_DIR/public/scripts/extensions/third-party/gugu-transit-manager"
 GUGU_TRANSIT_PLUGIN_TARGET="$ST_DIR/plugins/gugu-transit-manager-plugin"
 GUGU_TRANSIT_EXT_DIR="$GUGU_TRANSIT_EXT_TARGET"
@@ -132,6 +134,55 @@ fn_print_error_exit() {
     echo -e "\n${RED}✗ ${BOLD}$1${NC}\n${RED}流程已终止。${NC}" >&2
     fn_press_any_key
     exit 1
+}
+
+fn_fetch_source_manifest() {
+    if [[ -n "$SOURCE_MANIFEST_CONTENT" ]]; then
+        return 0
+    fi
+
+    local content
+    if ! content="$(curl -fsSL --connect-timeout 10 "$SOURCE_MANIFEST_URL")"; then
+        fn_print_error "无法获取发布源清单：$SOURCE_MANIFEST_URL"
+        return 1
+    fi
+
+    SOURCE_MANIFEST_CONTENT="$(printf '%s' "$content" | tr -d '\r\n')"
+    if [[ -z "$SOURCE_MANIFEST_CONTENT" ]]; then
+        fn_print_error "发布源清单内容为空。"
+        return 1
+    fi
+}
+
+fn_get_manifest_value() {
+    local key="$1"
+    local value
+
+    fn_fetch_source_manifest || return 1
+    value="$(printf '%s' "$SOURCE_MANIFEST_CONTENT" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")"
+    if [[ -z "$value" ]]; then
+        fn_print_error "发布源清单缺少字段：$key"
+        return 1
+    fi
+
+    printf '%s' "$value"
+}
+
+fn_load_first_party_sources() {
+    if [[ -n "$SCRIPT_URL" && -n "$GUGU_TRANSIT_EXT_REPO_URL" && -n "$GUGU_TRANSIT_PLUGIN_REPO_URL" && -n "$SOURCE_PROVIDER" ]]; then
+        return 0
+    fi
+
+    local provider script_url ext_repo plugin_repo
+    provider="$(fn_get_manifest_value "provider")" || return 1
+    script_url="$(fn_get_manifest_value "$FIRST_PARTY_SCRIPT_KEY")" || return 1
+    ext_repo="$(fn_get_manifest_value "gugu_transit_manager")" || return 1
+    plugin_repo="$(fn_get_manifest_value "gugu_transit_manager_plugin")" || return 1
+
+    SOURCE_PROVIDER="$provider"
+    SCRIPT_URL="$script_url"
+    GUGU_TRANSIT_EXT_REPO_URL="$ext_repo"
+    GUGU_TRANSIT_PLUGIN_REPO_URL="$plugin_repo"
 }
 
 fn_get_display_width() {
@@ -2232,7 +2283,12 @@ fn_update_script() {
     if ! fn_read_yes_no_prompt "检查并更新咕咕助手脚本" true ""; then
         return
     fi
-    fn_print_warning "正在从 Gitee 下载新版本..."
+    if ! fn_load_first_party_sources; then
+        fn_print_warning "更新已取消：发布源清单不可用。"
+        fn_press_any_key
+        return
+    fi
+    fn_print_warning "正在从当前发布源下载新版本..."
     local temp_file
     temp_file=$(mktemp)
     if ! curl -L -o "$temp_file" "$SCRIPT_URL"; then
@@ -2255,6 +2311,7 @@ fn_update_script() {
 
 fn_check_for_updates() {
     (
+        fn_load_first_party_sources >/dev/null 2>&1 || exit 0
         local temp_file
         temp_file=$(mktemp)
         if curl -L -s --connect-timeout 10 -o "$temp_file" "$SCRIPT_URL"; then
@@ -2565,67 +2622,32 @@ fn_write_gugu_transit_install_marker() {
 EOF
 }
 
-fn_get_gugu_transit_route_mode() {
-    local mode="auto"
-    if [ -f "$LAB_CONFIG_FILE" ]; then
-        local route_line
-        route_line="$(grep '^GUGU_TRANSIT_ROUTE_MODE=' "$LAB_CONFIG_FILE" 2>/dev/null | tail -n 1)"
-        if [[ -n "$route_line" ]]; then
-            mode="${route_line#*=}"
-            mode="${mode%\"}"
-            mode="${mode#\"}"
-        fi
-    fi
-
-    case "$mode" in
-        auto|mainland|overseas) echo "$mode" ;;
-        *) echo "auto" ;;
-    esac
-}
-
-fn_set_gugu_transit_route_mode() {
-    local mode="$1"
-
-    mkdir -p "$CONFIG_DIR"
-    touch "$LAB_CONFIG_FILE"
-    sed -i "/^${GUGU_TRANSIT_ROUTE_MODE_KEY}=/d" "$LAB_CONFIG_FILE"
-    echo "${GUGU_TRANSIT_ROUTE_MODE_KEY}=\"${mode}\"" >> "$LAB_CONFIG_FILE"
-}
-
 fn_resolve_gugu_transit_route() {
-    local mode
-    mode="$(fn_get_gugu_transit_route_mode)"
-
-    if [[ "$mode" == "auto" ]]; then
-        if fn_test_google_reachability >/dev/null 2>&1; then
-            echo "overseas"
-        else
-            echo "mainland"
-        fi
+    if ! fn_load_first_party_sources; then
+        echo "unknown"
         return
     fi
 
-    echo "$mode"
+    echo "$SOURCE_PROVIDER"
 }
 
 fn_get_gugu_transit_route_label() {
     local route="$1"
-    if [[ "$route" == "overseas" ]]; then
-        echo "海外 / GitHub"
-    else
-        echo "中国大陆 / Gitee"
-    fi
+    case "$route" in
+        github) echo "GitHub" ;;
+        gitee) echo "Gitee" ;;
+        *) echo "未知" ;;
+    esac
 }
 
 fn_get_gugu_transit_route_mode_label() {
-    local mode route_label
-    mode="$(fn_get_gugu_transit_route_mode)"
+    local route_label
     route_label="$(fn_get_gugu_transit_route_label "$(fn_resolve_gugu_transit_route)")"
 
-    if [[ "$mode" == "auto" ]]; then
-        echo "自动（当前：${route_label}）"
+    if [[ "$route_label" == "未知" ]]; then
+        echo "跟随服务器（当前不可用）"
     else
-        echo "手动：${route_label}"
+        echo "跟随服务器（当前：${route_label}）"
     fi
 }
 
@@ -2633,42 +2655,24 @@ fn_get_gugu_transit_repo_url() {
     local route="$1"
     local component="$2"
 
-    if [[ "$route" == "overseas" ]]; then
-        if [[ "$component" == "frontend" ]]; then
-            echo "$GUGU_TRANSIT_EXT_GITHUB_REPO"
-        else
-            echo "$GUGU_TRANSIT_PLUGIN_GITHUB_REPO"
-        fi
-        return
+    if ! fn_load_first_party_sources; then
+        return 1
     fi
 
     if [[ "$component" == "frontend" ]]; then
-        echo "$GUGU_TRANSIT_EXT_GITEE_REPO"
+        echo "$GUGU_TRANSIT_EXT_REPO_URL"
     else
-        echo "$GUGU_TRANSIT_PLUGIN_GITEE_REPO"
+        echo "$GUGU_TRANSIT_PLUGIN_REPO_URL"
     fi
 }
 
 fn_menu_gugu_transit_route_mode() {
-    while true; do
-        clear
-        fn_print_header "切换中转管理仓库"
-        echo -e "      当前模式: ${YELLOW}$(fn_get_gugu_transit_route_mode_label)${NC}\n"
-        echo -e "      [01] ${CYAN}自动选择${NC}"
-        echo -e "      [02] ${CYAN}中国大陆 / Gitee${NC}"
-        echo -e "      [03] ${CYAN}海外 / GitHub${NC}"
-        echo -e "      [00] ${CYAN}返回上一级${NC}\n"
-
-        local choice
-        choice="$(fn_read_menu_prompt "0-3")"
-        case "$choice" in
-            1) fn_set_gugu_transit_route_mode "auto"; fn_print_success "已切换为自动选择。"; sleep 1; return ;;
-            2) fn_set_gugu_transit_route_mode "mainland"; fn_print_success "已切换为中国大陆 / Gitee。"; sleep 1; return ;;
-            3) fn_set_gugu_transit_route_mode "overseas"; fn_print_success "已切换为海外 / GitHub。"; sleep 1; return ;;
-            0) return ;;
-            *) fn_print_error "输入无效，请按提示重试。"; sleep 1 ;;
-        esac
-    done
+    clear
+    fn_print_header "当前发布源"
+    echo -e "      第一方仓库现已统一跟随服务器发布源。"
+    echo -e "      当前来源: ${YELLOW}$(fn_get_gugu_transit_route_mode_label)${NC}"
+    echo -e "      如需切回 GitHub，只需要在服务器端调整 source-manifest.json。"
+    fn_press_any_key
 }
 
 fn_get_gugu_transit_status() {
@@ -2781,7 +2785,7 @@ fn_menu_gugu_transit_manager() {
         if [ -d "$GUGU_TRANSIT_EXT_DIR" ] || [ -d "$GUGU_TRANSIT_PLUGIN_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_EXT_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_PLUGIN_DIR" ] || [ -L "$GUGU_TRANSIT_EXT_TARGET" ] || [ -L "$GUGU_TRANSIT_PLUGIN_TARGET" ]; then
             echo -e "      [02] ${RED}卸载${NC}"
         fi
-        echo -e "      [03] ${CYAN}切换海内外仓库${NC}"
+        echo -e "      [03] ${CYAN}查看当前发布源${NC}"
 
         echo -e "      [00] ${CYAN}返回上一级${NC}\n"
 
