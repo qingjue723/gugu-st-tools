@@ -73,6 +73,8 @@ readonly AIS2API_OLD_IMAGE_REPO="ellinalopez/cloud-studio"
 readonly AIS2API_OLD_IMAGE="ellinalopez/cloud-studio:latest"
 readonly AIS2API_NEW_IMAGE_REPO="ghcr.io/ibuhub/aistudio-to-api"
 readonly AIS2API_NEW_IMAGE="ghcr.io/ibuhub/aistudio-to-api:latest"
+readonly ONEPANEL_TMP_DIR="/opt/1panel/backup/tmp"
+readonly ONEPANEL_TMP_RETENTION_DAYS=7
 ST_TRANSIT_FRONTEND_REPO_URL=""
 ST_TRANSIT_BACKEND_REPO_URL=""
 
@@ -813,6 +815,34 @@ EOF
 }
 
 
+fn_cleanup_1panel_tmp_files() {
+    if [ ! -d "$ONEPANEL_TMP_DIR" ]; then
+        log_info "未检测到 1Panel 临时备份目录，已跳过该清理项。"
+        return 0
+    fi
+
+    local expired_count
+    if ! expired_count=$(
+        set -o pipefail
+        find "$ONEPANEL_TMP_DIR" -type f -mtime +"$ONEPANEL_TMP_RETENTION_DAYS" -print | awk 'END { print NR }'
+    ); then
+        log_error "扫描 1Panel 临时备份目录失败！" || return 1
+    fi
+
+    if [ "$expired_count" -eq 0 ]; then
+        log_info "1Panel 临时备份目录中没有超过 ${ONEPANEL_TMP_RETENTION_DAYS} 天的文件。"
+        return 0
+    fi
+
+    log_info "正在清理 1Panel 临时备份目录中超过 ${ONEPANEL_TMP_RETENTION_DAYS} 天的文件..."
+    if find "$ONEPANEL_TMP_DIR" -type f -mtime +"$ONEPANEL_TMP_RETENTION_DAYS" -delete; then
+        log_success "1Panel 临时备份目录清理完成，共删除 ${expired_count} 个文件。"
+    else
+        log_error "清理 1Panel 临时备份目录失败！" || return 1
+    fi
+}
+
+
 run_system_cleanup() {
     log_action "即将执行系统安全清理..."
     echo -e "此操作将执行以下命令："
@@ -820,6 +850,9 @@ run_system_cleanup() {
     echo -e "  - ${CYAN}journalctl --vacuum-size=100M${NC} (压缩日志到100M)"
     if command -v docker &> /dev/null; then
         echo -e "  - ${CYAN}docker system prune -f${NC} (清理无用的Docker镜像和容器)"
+    fi
+    if [ -d "$ONEPANEL_TMP_DIR" ]; then
+        echo -e "  - ${CYAN}find ${ONEPANEL_TMP_DIR}/ -type f -mtime +${ONEPANEL_TMP_RETENTION_DAYS} -delete${NC} (清理1Panel超过${ONEPANEL_TMP_RETENTION_DAYS}天的临时文件)"
     fi
     read -rp "确认要继续吗? [Y/n] " confirm < /dev/tty
     if [[ ! "${confirm:-y}" =~ ^[Yy]$ ]]; then
@@ -842,6 +875,8 @@ run_system_cleanup() {
     else
         log_warn "未检测到 Docker，已跳过 Docker 系统清理步骤。"
     fi
+
+    fn_cleanup_1panel_tmp_files
 
     log_info "系统安全清理已全部完成！"
 }
