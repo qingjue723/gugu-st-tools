@@ -12,7 +12,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-readonly SCRIPT_VERSION="v5.25"
+readonly SCRIPT_VERSION="v5.26"
 GUGU_MODE="prod"
 
 if [ "$GUGU_MODE" = "prod" ]; then
@@ -65,7 +65,7 @@ fi
 CUSTOM_PROXY_IMAGE=""
 USER_HOME=""
 readonly SOURCE_MANIFEST_URL="https://gugu.qjyg.de/source-manifest.json"
-readonly FIRST_PARTY_SCRIPT_KEY="dckr_st_test"
+readonly FIRST_PARTY_SCRIPT_KEY="dckr_st"
 SOURCE_MANIFEST_CONTENT=""
 SOURCE_PROVIDER=""
 SCRIPT_DOWNLOAD_URL=""

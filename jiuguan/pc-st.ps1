@@ -7,7 +7,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-$ScriptVersion = "v5.25"
+$ScriptVersion = "v5.26"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -569,6 +569,119 @@ function Set-STNestedBooleanValue {
 
     [System.IO.File]::WriteAllText($configPath, (($lines -join "`r`n") + "`r`n"), [System.Text.Encoding]::UTF8)
     return $true
+}
+
+function Get-STStartHeapLimit {
+    $startBatPath = Join-Path $ST_Dir "Start.bat"
+    if (-not (Test-Path $startBatPath)) { return $null }
+    $content = Get-Content $startBatPath -Raw
+    if ($content -match '--max-old-space-size=(\d+)') {
+        return $Matches[1]
+    }
+    return $null
+}
+
+function Get-STRecommendedHeapLimitMb {
+    try {
+        $value = [int]((Get-CimInstance -ClassName Win32_OperatingSystem).FreePhysicalMemory / 1024 * 0.75)
+        if ($value -lt 256) { return 256 }
+        return $value
+    } catch {
+        return $null
+    }
+}
+
+function Set-STStartHeapLimit {
+    param([int]$HeapMb)
+    $startBatPath = Join-Path $ST_Dir "Start.bat"
+    if (-not (Test-Path $startBatPath)) { return $false }
+
+    $content = Get-Content $startBatPath -Raw
+    if ($content -match '--max-old-space-size=\d+') {
+        $newContent = $content -replace '--max-old-space-size=\d+', "--max-old-space-size=$HeapMb"
+    } else {
+        $pattern = '(?m)^([ \t]*node)\s+("?server\.js"?\s+%.*)$'
+        $newContent = $content -replace $pattern, ('$1 --max-old-space-size=' + $HeapMb + ' $2')
+    }
+
+    if ($newContent -eq $content) { return $false }
+    [System.IO.File]::WriteAllText($startBatPath, $newContent, [System.Text.Encoding]::UTF8)
+    return $true
+}
+
+function Clear-STStartHeapLimit {
+    $startBatPath = Join-Path $ST_Dir "Start.bat"
+    if (-not (Test-Path $startBatPath)) { return $false }
+
+    $content = Get-Content $startBatPath -Raw
+    $newContent = $content -replace '\s+--max-old-space-size=\d+', ''
+    if ($newContent -eq $content) { return $true }
+    [System.IO.File]::WriteAllText($startBatPath, $newContent, [System.Text.Encoding]::UTF8)
+    return $true
+}
+
+function Show-STOomMemoryMenu {
+    while ($true) {
+        Clear-Host
+        Write-Header "OOM 内存修复"
+        if (-not (Test-Path (Join-Path $ST_Dir "Start.bat"))) {
+            Write-Warning "未找到 Start.bat，请先部署酒馆。"
+            Press-Any-Key
+            return
+        }
+
+        $currentLimit = Get-STStartHeapLimit
+        $recommendedLimit = Get-STRecommendedHeapLimitMb
+        Write-Host "      当前启动内存上限: " -NoNewline
+        if ([string]::IsNullOrWhiteSpace($currentLimit)) { Write-Host "默认" -ForegroundColor Yellow } else { Write-Host "$currentLimit MB" -ForegroundColor Green }
+        Write-Host "      推荐设置值: " -NoNewline
+        if ($null -eq $recommendedLimit) { Write-Host "计算失败" -ForegroundColor Red } else { Write-Host "$recommendedLimit MB" -ForegroundColor Yellow }
+        Write-Host "`n      仅在出现 JavaScript heap out of memory 时建议修改。"
+        Write-Host "      [1] " -NoNewline; Write-Host "一键设置为推荐值" -ForegroundColor Cyan
+        Write-Host "      [2] " -NoNewline; Write-Host "手动设置内存上限" -ForegroundColor Cyan
+        Write-Host "      [3] " -NoNewline; Write-Host "恢复默认启动参数" -ForegroundColor Yellow
+        Write-Host "      [0] " -NoNewline; Write-Host "返回上一级" -ForegroundColor Cyan
+
+        $choice = Read-MenuPrompt -Allowed "0-3"
+        switch ($choice) {
+            "1" {
+                if ($null -eq $recommendedLimit) {
+                    Write-Error "无法计算推荐值，请手动设置。"
+                } elseif (Set-STStartHeapLimit -HeapMb $recommendedLimit) {
+                    Write-Success "已将启动内存上限设置为 $recommendedLimit MB。"
+                    Write-Warning "设置将在重启酒馆后生效。"
+                } else {
+                    Write-Error "写入 Start.bat 失败。"
+                }
+                Press-Any-Key
+            }
+            "2" {
+                $manualLimit = Read-TextPrompt -Label "内存上限(MB)" -DefaultValue "$recommendedLimit"
+                if ($manualLimit -match '^\d+$' -and [int]$manualLimit -ge 256) {
+                    if (Set-STStartHeapLimit -HeapMb ([int]$manualLimit)) {
+                        Write-Success "已将启动内存上限设置为 $manualLimit MB。"
+                        Write-Warning "设置将在重启酒馆后生效。"
+                    } else {
+                        Write-Error "写入 Start.bat 失败。"
+                    }
+                } else {
+                    Write-Error "请输入不小于 256 的整数。"
+                }
+                Press-Any-Key
+            }
+            "3" {
+                if (Clear-STStartHeapLimit) {
+                    Write-Success "已恢复默认启动参数。"
+                    Write-Warning "设置将在重启酒馆后生效。"
+                } else {
+                    Write-Error "写入 Start.bat 失败。"
+                }
+                Press-Any-Key
+            }
+            "0" { return }
+            default { Write-Warning "输入无效，请按提示重试。"; Start-Sleep 1 }
+        }
+    }
 }
 
 function Add-STWhitelistEntry {
@@ -3173,6 +3286,7 @@ function Show-STConfigMenu {
         $currServerPlugins = Get-STConfigValue "enableServerPlugins"
         $currExtensionsAutoUpdate = Get-STNestedConfigValue "extensions" "autoUpdate"
         $currServerPluginsAutoUpdate = Get-STConfigValue "enableServerPluginsAutoUpdate"
+        $currHeapLimit = Get-STStartHeapLimit
 
         $isSingleUser = ($currAuth -eq "true" -and $currUser -eq "false")
         $isMultiUser = ($currAuth -eq "false" -and $currUser -eq "true")
@@ -3198,6 +3312,8 @@ function Show-STConfigMenu {
         if ($currExtensionsAutoUpdate -eq "true") { Write-Host "已开启" -ForegroundColor Green } else { Write-Host "已关闭" -ForegroundColor Red }
         Write-Host "      后端自动更新(无法启动时建议关闭): " -NoNewline
         if ($currServerPluginsAutoUpdate -eq "true") { Write-Host "已开启" -ForegroundColor Green } else { Write-Host "已关闭" -ForegroundColor Red }
+        Write-Host "      启动内存上限: " -NoNewline
+        if ([string]::IsNullOrWhiteSpace($currHeapLimit)) { Write-Host "默认" -ForegroundColor Yellow } else { Write-Host "$currHeapLimit MB" -ForegroundColor Green }
 
         Write-Host "`n      [1] " -NoNewline; Write-Host "修改端口号" -ForegroundColor Cyan
         Write-Host "      [2] " -NoNewline; Write-Host "切换为：默认无账密模式" -ForegroundColor Cyan
@@ -3215,10 +3331,11 @@ function Show-STConfigMenu {
         if ($currExtensionsAutoUpdate -eq "true") { Write-Host "关闭前端扩展自动更新" -ForegroundColor Red } else { Write-Host "开启前端扩展自动更新" -ForegroundColor Yellow }
         Write-Host "      [8] " -NoNewline
         if ($currServerPluginsAutoUpdate -eq "true") { Write-Host "关闭后端插件自动更新(无法启动时建议关闭)" -ForegroundColor Red } else { Write-Host "开启后端插件自动更新(无法启动时建议关闭)" -ForegroundColor Yellow }
+        Write-Host "      [9] " -NoNewline; Write-Host "OOM 内存修复(仅报错时使用)" -ForegroundColor Cyan
         
         Write-Host "`n      [0] " -NoNewline; Write-Host "返回主菜单" -ForegroundColor Cyan
 
-        $choice = Read-MenuPrompt -Allowed "0-8"
+        $choice = Read-MenuPrompt -Allowed "0-9"
         switch ($choice) {
             "1" {
                 $newPort = Read-TextPrompt -Label "端口号" -Hint "1024-65535"
@@ -3392,6 +3509,7 @@ function Show-STConfigMenu {
                 Write-Warning "设置将在重启酒馆后生效。"
                 Press-Any-Key
             }
+            "9" { Show-STOomMemoryMenu }
             "0" { return }
             default { Write-Warning "输入无效，请按提示重试。"; Start-Sleep 1 }
         }

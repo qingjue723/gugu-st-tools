@@ -34,6 +34,7 @@ ST_DIR="$HOME/SillyTavern"
 BACKUP_ROOT_DIR="$HOME/SillyTavern_Backups"
 REPO_BRANCH="release"
 BACKUP_LIMIT=10
+readonly SCRIPT_VERSION="v5.26"
 SCRIPT_SELF_PATH=$(readlink -f "$0")
 readonly SOURCE_MANIFEST_URL="https://gugu.qjyg.de/source-manifest.json"
 readonly FIRST_PARTY_SCRIPT_KEY="ad_st_test"
@@ -84,7 +85,7 @@ GIT_LAST_LOG_FILE=""
 PKG_NONINTERACTIVE_NOTICE_SHOWN="false"
 
 fn_show_main_header() {
-    echo -e "    ${YELLOW}>>${GREEN} 清绝咕咕助手 v5.25${NC}"
+    echo -e "    ${YELLOW}>>${GREEN} 清绝咕咕助手 ${SCRIPT_VERSION}${NC}"
     echo -e "       ${BOLD}\033[0;37m作者: 清绝 | 网址: blog.qjyg.de${NC}"
     echo -e "    ${RED}本脚本为免费工具，严禁用于商业倒卖！${NC}"
 }
@@ -586,6 +587,104 @@ fn_set_st_extensions_auto_update() {
     fi
 
     printf '\nextensions:\n  autoUpdate: %s\n' "$enabled" >> "$config_path"
+}
+
+fn_get_st_heap_limit_mb() {
+    local start_path="$ST_DIR/start.sh"
+    [ ! -f "$start_path" ] && return 1
+    grep -Eo -- '--max-old-space-size=[0-9]+' "$start_path" | head -n 1 | cut -d= -f2
+}
+
+fn_get_recommended_st_heap_limit_mb() {
+    free -m 2>/dev/null | awk 'NR==2{value=int($7 * 0.75); if (value < 256) value=256; print value; exit}'
+}
+
+fn_set_st_heap_limit_mb() {
+    local heap_mb="$1"
+    local start_path="$ST_DIR/start.sh"
+    [ ! -f "$start_path" ] && return 1
+
+    if grep -q -- '--max-old-space-size=' "$start_path"; then
+        sed -i -E "s/--max-old-space-size=[0-9]+/--max-old-space-size=${heap_mb}/" "$start_path"
+        return $?
+    fi
+
+    sed -i -E '/server\.js/ s|node[[:space:]]+|node --max-old-space-size='"${heap_mb}"' |' "$start_path"
+}
+
+fn_clear_st_heap_limit_mb() {
+    local start_path="$ST_DIR/start.sh"
+    [ ! -f "$start_path" ] && return 1
+    sed -i -E 's/[[:space:]]+--max-old-space-size=[0-9]+//g' "$start_path"
+}
+
+fn_menu_st_oom_memory() {
+    local current_limit recommended_limit heap_label choice manual_limit
+
+    while true; do
+        clear
+        fn_print_header "OOM 内存修复"
+        if [ ! -f "$ST_DIR/start.sh" ]; then
+            fn_print_warning "未找到 start.sh，请先部署酒馆。"
+            fn_press_any_key
+            return
+        fi
+
+        current_limit="$(fn_get_st_heap_limit_mb 2>/dev/null || true)"
+        recommended_limit="$(fn_get_recommended_st_heap_limit_mb 2>/dev/null || true)"
+        heap_label="${current_limit:-默认}"
+        echo -e "      当前启动内存上限: ${GREEN}${heap_label}${NC}${current_limit:+ MB}"
+        if [[ -n "$recommended_limit" ]]; then
+            echo -e "      推荐设置值: ${YELLOW}${recommended_limit} MB${NC}"
+        else
+            echo -e "      推荐设置值: ${RED}计算失败${NC}"
+        fi
+        echo -e "\n      仅在出现 ${RED}JavaScript heap out of memory${NC} 时建议修改。"
+        echo -e "      [1] ${CYAN}一键设置为推荐值${NC}"
+        echo -e "      [2] ${CYAN}手动设置内存上限${NC}"
+        echo -e "      [3] ${YELLOW}恢复默认启动参数${NC}"
+        echo -e "      [0] ${CYAN}返回上一级${NC}\n"
+
+        choice="$(fn_read_menu_prompt "0-3")"
+        case "$choice" in
+            1)
+                if [[ -z "$recommended_limit" ]]; then
+                    fn_print_error "无法计算推荐值，请手动设置。"
+                elif fn_set_st_heap_limit_mb "$recommended_limit"; then
+                    fn_print_success "已将启动内存上限设置为 ${recommended_limit} MB。"
+                    fn_print_warning "设置将在重启酒馆后生效。"
+                else
+                    fn_print_error "写入 start.sh 失败。"
+                fi
+                fn_press_any_key
+                ;;
+            2)
+                manual_limit="$(fn_read_text_prompt "请输入内存上限(MB)" "${recommended_limit}" "" true)"
+                if [[ "$manual_limit" =~ ^[0-9]+$ ]] && [ "$manual_limit" -ge 256 ]; then
+                    if fn_set_st_heap_limit_mb "$manual_limit"; then
+                        fn_print_success "已将启动内存上限设置为 ${manual_limit} MB。"
+                        fn_print_warning "设置将在重启酒馆后生效。"
+                    else
+                        fn_print_error "写入 start.sh 失败。"
+                    fi
+                else
+                    fn_print_error "请输入不小于 256 的整数。"
+                fi
+                fn_press_any_key
+                ;;
+            3)
+                if fn_clear_st_heap_limit_mb; then
+                    fn_print_success "已恢复默认启动参数。"
+                    fn_print_warning "设置将在重启酒馆后生效。"
+                else
+                    fn_print_error "写入 start.sh 失败。"
+                fi
+                fn_press_any_key
+                ;;
+            0) return ;;
+            *) fn_print_error "输入无效，请按提示重试。"; sleep 1 ;;
+        esac
+    done
 }
 
 fn_add_st_whitelist_entry() {
@@ -3179,6 +3278,7 @@ fn_menu_st_config() {
         local curr_server_plugins=$(fn_get_st_config_value "enableServerPlugins")
         local curr_extensions_auto_update=$(fn_get_st_nested_config_value "extensions" "autoUpdate")
         local curr_server_plugins_auto_update=$(fn_get_st_config_value "enableServerPluginsAutoUpdate")
+        local curr_heap_limit=$(fn_get_st_heap_limit_mb 2>/dev/null || true)
 
         local mode_text="未知"
         if [[ "$curr_auth" == "false" && "$curr_user" == "false" ]]; then
@@ -3204,6 +3304,8 @@ fn_menu_st_config() {
         if [[ "$curr_extensions_auto_update" == "true" ]]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
         echo -en "      后端自动更新(无法启动时建议关闭): "
         if [[ "$curr_server_plugins_auto_update" == "true" ]]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
+        echo -en "      启动内存上限: "
+        if [[ -n "$curr_heap_limit" ]]; then echo -e "${GREEN}${curr_heap_limit} MB${NC}"; else echo -e "${YELLOW}默认${NC}"; fi
 
         echo -e "\n      [1] ${CYAN}修改端口号${NC}"
         echo -e "      [2] ${CYAN}切换为：默认无账密模式${NC}"
@@ -3236,10 +3338,11 @@ fn_menu_st_config() {
         else
             echo -e "      [8] ${YELLOW}开启后端插件自动更新(无法启动时建议关闭)${NC}"
         fi
+        echo -e "      [9] ${CYAN}OOM 内存修复(仅报错时使用)${NC}"
         
         echo -e "\n      [0] ${CYAN}返回上一级${NC}"
 
-        choice="$(fn_read_menu_prompt "0-8")"
+        choice="$(fn_read_menu_prompt "0-9")"
         case "$choice" in
             1)
                 new_port="$(fn_read_text_prompt "请输入新的端口号 (1024-65535)" "" "" true)"
@@ -3401,6 +3504,7 @@ fn_menu_st_config() {
                 fn_print_warning "设置将在重启酒馆后生效。"
                 fn_press_any_key
                 ;;
+            9) fn_menu_st_oom_memory ;;
             0) return ;;
             *) fn_print_error "输入无效，请按提示重试。"; sleep 1 ;;
         esac
