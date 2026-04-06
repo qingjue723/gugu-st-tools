@@ -25,6 +25,17 @@ lib/
 *.log
 _cache/
 
+# 忽略本地开发/代理/任务文件
+.codex-tasks/
+plans/
+AGENTS.md
+cloudflare-worker.local.js
+source-manifest.json
+
+# 忽略 Windows 自更新临时文件
+jiuguan/upd.bat
+jiuguan/pc-st.new.ps1
+
 main.sh
 linux-easy.sh
 SCRIPT_NOTES.md

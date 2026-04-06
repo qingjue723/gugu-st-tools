@@ -551,6 +551,43 @@ fn_update_st_nested_config_value() {
     sed -i -E "/^${parent}:/,/^[^[:space:]]/ s|^([[:space:]]+${key}:[[:space:]]*)[^#\r\n]*(.*)$|\1${escaped_value}\2|" "$config_path"
 }
 
+fn_set_st_root_boolean_value() {
+    local key="$1"
+    local enabled="$2"
+    local config_path="$ST_DIR/config.yaml"
+    [ ! -f "$config_path" ] && return 1
+
+    if grep -qE "^${key}:" "$config_path"; then
+        fn_update_st_config_value "$key" "$enabled"
+        return $?
+    fi
+
+    printf '\n%s: %s\n' "$key" "$enabled" >> "$config_path"
+}
+
+fn_set_st_extensions_auto_update() {
+    local enabled="$1"
+    local config_path="$ST_DIR/config.yaml"
+    [ ! -f "$config_path" ] && return 1
+
+    if awk '
+        /^extensions:/ { found=1; next }
+        found && /^[[:space:]]+autoUpdate:/ { found_key=1 }
+        found && /^[^[:space:]]/ { exit }
+        END { exit found_key ? 0 : 1 }
+    ' "$config_path"; then
+        fn_update_st_nested_config_value "extensions" "autoUpdate" "$enabled"
+        return $?
+    fi
+
+    if grep -qE '^extensions:' "$config_path"; then
+        sed -i "/^extensions:/a\\  autoUpdate: ${enabled}" "$config_path"
+        return $?
+    fi
+
+    printf '\nextensions:\n  autoUpdate: %s\n' "$enabled" >> "$config_path"
+}
+
 fn_add_st_whitelist_entry() {
     local entry="$1"
     local config_path="$ST_DIR/config.yaml"
@@ -2704,7 +2741,7 @@ fn_install_gugu_transit_manager() {
     clear
     fn_print_header "安装/更新咕咕助手 - 中转管理"
     local route frontend_repo_url backend_repo_url
-    local current_server_plugins
+    local current_server_plugins current_server_plugins_auto_update
 
     if [ ! -d "$ST_DIR" ]; then
         fn_print_error "未检测到酒馆目录，请先完成首次部署。"
@@ -2738,10 +2775,23 @@ fn_install_gugu_transit_manager() {
     fi
 
     current_server_plugins="$(fn_get_st_config_value "enableServerPlugins")"
+    current_server_plugins_auto_update="$(fn_get_st_config_value "enableServerPluginsAutoUpdate")"
     fn_write_gugu_transit_install_marker
     if [[ "$current_server_plugins" != "true" ]]; then
-        fn_update_st_config_value "enableServerPlugins" "true" >/dev/null 2>&1 || true
+        if ! fn_set_st_root_boolean_value "enableServerPlugins" "true"; then
+            fn_print_error "开启酒馆后端插件失败，请检查 config.yaml 是否可写。"
+            fn_press_any_key
+            return
+        fi
         fn_print_warning "检测到酒馆后端插件原本未开启，已自动开启。"
+    fi
+    if [[ "$current_server_plugins_auto_update" != "false" ]]; then
+        if ! fn_set_st_root_boolean_value "enableServerPluginsAutoUpdate" "false"; then
+            fn_print_error "关闭后端插件自动更新失败，请检查 config.yaml 是否可写。"
+            fn_press_any_key
+            return
+        fi
+        fn_print_warning "已自动关闭后端插件自动更新，避免仓库异常阻塞酒馆启动。"
     fi
 
     fn_print_success "咕咕助手 - 中转管理 已安装/更新完成。"
@@ -3127,6 +3177,8 @@ fn_menu_st_config() {
         local curr_user=$(fn_get_st_config_value "enableUserAccounts")
         local curr_listen=$(fn_get_st_config_value "listen")
         local curr_server_plugins=$(fn_get_st_config_value "enableServerPlugins")
+        local curr_extensions_auto_update=$(fn_get_st_nested_config_value "extensions" "autoUpdate")
+        local curr_server_plugins_auto_update=$(fn_get_st_config_value "enableServerPluginsAutoUpdate")
 
         local mode_text="未知"
         if [[ "$curr_auth" == "false" && "$curr_user" == "false" ]]; then
@@ -3148,6 +3200,10 @@ fn_menu_st_config() {
         if [[ "$curr_listen" == "true" ]]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
         echo -en "      后端插件: "
         if [[ "$curr_server_plugins" == "true" ]]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
+        echo -en "      前端自动更新: "
+        if [[ "$curr_extensions_auto_update" == "true" ]]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
+        echo -en "      后端自动更新: "
+        if [[ "$curr_server_plugins_auto_update" == "true" ]]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
 
         echo -e "\n      [1] ${CYAN}修改端口号${NC}"
         echo -e "      [2] ${CYAN}切换为：默认无账密模式${NC}"
@@ -3170,10 +3226,20 @@ fn_menu_st_config() {
         else
             echo -e "      [6] ${YELLOW}开启后端插件${NC}"
         fi
+        if [[ "$curr_extensions_auto_update" == "true" ]]; then
+            echo -e "      [7] ${RED}关闭前端扩展自动更新${NC}"
+        else
+            echo -e "      [7] ${YELLOW}开启前端扩展自动更新${NC}"
+        fi
+        if [[ "$curr_server_plugins_auto_update" == "true" ]]; then
+            echo -e "      [8] ${RED}关闭后端插件自动更新${NC}"
+        else
+            echo -e "      [8] ${YELLOW}开启后端插件自动更新${NC}"
+        fi
         
         echo -e "\n      [0] ${CYAN}返回上一级${NC}"
 
-        choice="$(fn_read_menu_prompt "0-6")"
+        choice="$(fn_read_menu_prompt "0-8")"
         case "$choice" in
             1)
                 new_port="$(fn_read_text_prompt "请输入新的端口号 (1024-65535)" "" "" true)"
@@ -3297,6 +3363,40 @@ fn_menu_st_config() {
                 else
                     fn_update_st_config_value "enableServerPlugins" "true"
                     fn_print_success "后端插件已开启。"
+                fi
+                fn_print_warning "设置将在重启酒馆后生效。"
+                fn_press_any_key
+                ;;
+            7)
+                if [[ "$curr_extensions_auto_update" == "true" ]]; then
+                    if fn_set_st_extensions_auto_update "false"; then
+                        fn_print_success "前端扩展自动更新已关闭。"
+                    else
+                        fn_print_error "前端扩展自动更新写入失败。"
+                    fi
+                else
+                    if fn_set_st_extensions_auto_update "true"; then
+                        fn_print_success "前端扩展自动更新已开启。"
+                    else
+                        fn_print_error "前端扩展自动更新写入失败。"
+                    fi
+                fi
+                fn_print_warning "设置将在重启酒馆后生效。"
+                fn_press_any_key
+                ;;
+            8)
+                if [[ "$curr_server_plugins_auto_update" == "true" ]]; then
+                    if fn_set_st_root_boolean_value "enableServerPluginsAutoUpdate" "false"; then
+                        fn_print_success "后端插件自动更新已关闭。"
+                    else
+                        fn_print_error "后端插件自动更新写入失败。"
+                    fi
+                else
+                    if fn_set_st_root_boolean_value "enableServerPluginsAutoUpdate" "true"; then
+                        fn_print_success "后端插件自动更新已开启。"
+                    else
+                        fn_print_error "后端插件自动更新写入失败。"
+                    fi
                 fi
                 fn_print_warning "设置将在重启酒馆后生效。"
                 fn_press_any_key

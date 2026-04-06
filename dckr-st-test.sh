@@ -2102,6 +2102,21 @@ fn_st_is_server_plugin_enabled() {
     grep -Eq '^[[:space:]]*enableServerPlugins:[[:space:]]*true([[:space:]]|$)' "$config_file"
 }
 
+fn_st_is_server_plugin_auto_update_enabled() {
+    local config_file="$1"
+    grep -Eq '^[[:space:]]*enableServerPluginsAutoUpdate:[[:space:]]*true([[:space:]]|$)' "$config_file"
+}
+
+fn_st_is_extensions_auto_update_enabled() {
+    local config_file="$1"
+    awk '
+        /^extensions:/ { found=1; next }
+        found && /^[[:space:]]+autoUpdate:[[:space:]]*true([[:space:]]|$)/ { found_key=1 }
+        found && /^[^[:space:]]/ { exit 1 }
+        END { exit found_key ? 0 : 1 }
+    ' "$config_file"
+}
+
 fn_st_set_server_plugin_enabled() {
     local config_file="$1"
     local enabled="$2"
@@ -2116,6 +2131,49 @@ fn_st_set_server_plugin_enabled() {
     else
         printf '\nenableServerPlugins: %s\n' "$target_value" >> "$config_file"
     fi
+}
+
+fn_st_set_server_plugin_auto_update_enabled() {
+    local config_file="$1"
+    local enabled="$2"
+    local target_value="false"
+
+    if [ "$enabled" = "true" ]; then
+        target_value="true"
+    fi
+
+    if grep -qE '^[[:space:]]*enableServerPluginsAutoUpdate:' "$config_file"; then
+        sed -i -E "s/^([[:space:]]*)enableServerPluginsAutoUpdate:.*/\1enableServerPluginsAutoUpdate: ${target_value}/" "$config_file"
+    else
+        printf '\nenableServerPluginsAutoUpdate: %s\n' "$target_value" >> "$config_file"
+    fi
+}
+
+fn_st_set_extensions_auto_update_enabled() {
+    local config_file="$1"
+    local enabled="$2"
+    local target_value="false"
+
+    if [ "$enabled" = "true" ]; then
+        target_value="true"
+    fi
+
+    if awk '
+        /^extensions:/ { found=1; next }
+        found && /^[[:space:]]+autoUpdate:/ { found_key=1 }
+        found && /^[^[:space:]]/ { exit }
+        END { exit found_key ? 0 : 1 }
+    ' "$config_file"; then
+        sed -i -E "/^extensions:/,/^[^[:space:]]/ s/^([[:space:]]*)autoUpdate:.*/\1autoUpdate: ${target_value}/" "$config_file"
+        return
+    fi
+
+    if grep -qE '^extensions:' "$config_file"; then
+        sed -i "/^extensions:/a\\  autoUpdate: ${target_value}" "$config_file"
+        return
+    fi
+
+    printf '\nextensions:\n  autoUpdate: %s\n' "$target_value" >> "$config_file"
 }
 
 fn_st_fix_repo_owner() {
@@ -2206,6 +2264,7 @@ fn_st_show_transit_status() {
     echo -e "前端扩展: ${YELLOW}$(fn_st_get_transit_repo_state_label "$frontend_state")${NC}"
     echo -e "后端插件: ${YELLOW}$(fn_st_get_transit_repo_state_label "$backend_state")${NC}"
     echo -e "后端开关: $(if fn_st_is_server_plugin_enabled "$config_file"; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi)"
+    echo -e "后端自动更新: $(if fn_st_is_server_plugin_auto_update_enabled "$config_file"; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi)"
     echo -e "前端目录: ${CYAN}${frontend_dir}${NC}"
     echo -e "后端目录: ${CYAN}${backend_dir}${NC}"
     echo -e "前端源: ${CYAN}${frontend_origin:-未安装}${NC}"
@@ -2306,6 +2365,10 @@ fn_st_transit_manager() {
                 if ! fn_st_is_server_plugin_enabled "$config_file"; then
                     fn_st_set_server_plugin_enabled "$config_file" "true"
                     log_success "已自动开启后端插件开关。"
+                fi
+                if fn_st_is_server_plugin_auto_update_enabled "$config_file"; then
+                    fn_st_set_server_plugin_auto_update_enabled "$config_file" "false"
+                    log_success "已自动关闭后端插件自动更新，避免仓库异常阻塞酒馆启动。"
                 fi
                 fn_st_restart_sillytavern_service "$project_dir" "$compose_cmd" || { read -rp "按 Enter 继续..." < /dev/tty; continue; }
                 log_success "中转管理插件已安装或更新完成。"
@@ -4128,8 +4191,16 @@ fn_st_docker_manager() {
     while true; do
         # 状态检测
         local is_multi_user=false
+        local frontend_auto_update_enabled=false
+        local server_plugin_auto_update_enabled=false
         if grep -q "enableUserAccounts: true" "$config_file" 2>/dev/null; then
             is_multi_user=true
+        fi
+        if fn_st_is_extensions_auto_update_enabled "$config_file"; then
+            frontend_auto_update_enabled=true
+        fi
+        if fn_st_is_server_plugin_auto_update_enabled "$config_file"; then
+            server_plugin_auto_update_enabled=true
         fi
 
         local is_beautified=false
@@ -4144,6 +4215,10 @@ fn_st_docker_manager() {
         if [ "$is_multi_user" = true ]; then echo -e "${GREEN}多用户模式${NC}"; else echo -e "${YELLOW}单用户模式${NC}"; fi
         echo -ne "登录页美化: "
         if [ "$is_beautified" = true ]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
+        echo -ne "前端自动更新: "
+        if [ "$frontend_auto_update_enabled" = true ]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
+        echo -ne "后端自动更新: "
+        if [ "$server_plugin_auto_update_enabled" = true ]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
         echo -e "------------------------"
         echo -e "  [1] 重启酒馆 (restart)"
         echo -e "  [2] 重建酒馆 (recreate)"
@@ -4167,6 +4242,16 @@ fn_st_docker_manager() {
         echo -e "  [9] ${CYAN}代理配置管理${NC}"
         echo -e "  [10] ${CYAN}Host 白名单域名管理${NC}"
         echo -e "  [11] ${CYAN}中转管理插件${NC}"
+        if [ "$frontend_auto_update_enabled" = true ]; then
+            echo -e "  [12] ${RED}关闭前端扩展自动更新${NC}"
+        else
+            echo -e "  [12] ${YELLOW}开启前端扩展自动更新${NC}"
+        fi
+        if [ "$server_plugin_auto_update_enabled" = true ]; then
+            echo -e "  [13] ${RED}关闭后端插件自动更新${NC}"
+        else
+            echo -e "  [13] ${YELLOW}开启后端插件自动更新${NC}"
+        fi
         echo -e "  [x] 彻底卸载酒馆"
         echo -e "  [0] 返回上一级"
         echo -e "------------------------"
@@ -4229,6 +4314,28 @@ fn_st_docker_manager() {
                 ;;
             11)
                 fn_st_transit_manager "$project_dir" "$config_file" "$compose_cmd"
+                ;;
+            12)
+                if [ "$frontend_auto_update_enabled" = true ]; then
+                    fn_st_set_extensions_auto_update_enabled "$config_file" "false"
+                    log_success "前端扩展自动更新已关闭。"
+                else
+                    fn_st_set_extensions_auto_update_enabled "$config_file" "true"
+                    log_success "前端扩展自动更新已开启。"
+                fi
+                fn_st_restart_sillytavern_service "$project_dir" "$compose_cmd"
+                read -rp "按 Enter 继续..." < /dev/tty
+                ;;
+            13)
+                if [ "$server_plugin_auto_update_enabled" = true ]; then
+                    fn_st_set_server_plugin_auto_update_enabled "$config_file" "false"
+                    log_success "后端插件自动更新已关闭。"
+                else
+                    fn_st_set_server_plugin_auto_update_enabled "$config_file" "true"
+                    log_success "后端插件自动更新已开启。"
+                fi
+                fn_st_restart_sillytavern_service "$project_dir" "$compose_cmd"
+                read -rp "按 Enter 继续..." < /dev/tty
                 ;;
             x|X)
                 if fn_uninstall_docker_app "sillytavern" "SillyTavern" "$project_dir" "ghcr.io/sillytavern/sillytavern:latest"; then

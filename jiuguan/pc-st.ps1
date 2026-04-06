@@ -7,7 +7,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-$ScriptVersion = "v5.23"
+$ScriptVersion = "v5.24"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -502,6 +502,73 @@ function Update-STNestedConfigValue {
         return $true
     }
     return $false
+}
+
+function Set-STRootBooleanValue {
+    param([string]$Key, [bool]$Enabled)
+    $configPath = Join-Path $ST_Dir "config.yaml"
+    if (-not (Test-Path $configPath)) { return $false }
+
+    $targetValue = if ($Enabled) { 'true' } else { 'false' }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.AddRange([string[]](Get-Content $configPath))
+    $updated = $false
+
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match "^\s*${Key}:") {
+            $lines[$i] = "${Key}: $targetValue"
+            $updated = $true
+            break
+        }
+    }
+
+    if (-not $updated) {
+        $lines.Add('')
+        $lines.Add("${Key}: $targetValue")
+    }
+
+    [System.IO.File]::WriteAllText($configPath, (($lines -join "`r`n") + "`r`n"), [System.Text.Encoding]::UTF8)
+    return $true
+}
+
+function Set-STNestedBooleanValue {
+    param([string]$ParentKey, [string]$Key, [bool]$Enabled)
+    $configPath = Join-Path $ST_Dir "config.yaml"
+    if (-not (Test-Path $configPath)) { return $false }
+
+    $targetValue = if ($Enabled) { 'true' } else { 'false' }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.AddRange([string[]](Get-Content $configPath))
+    $parentIndex = -1
+    $updated = $false
+
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match "^\s*${ParentKey}:\s*(#.*)?$") {
+            $parentIndex = $i
+            for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+                if ($lines[$j] -match '^[^\s]') { break }
+                if ($lines[$j] -match "^\s+${Key}:") {
+                    $lines[$j] = "  ${Key}: $targetValue"
+                    $updated = $true
+                    break
+                }
+            }
+            break
+        }
+    }
+
+    if (-not $updated) {
+        if ($parentIndex -ge 0) {
+            $lines.Insert($parentIndex + 1, "  ${Key}: $targetValue")
+        } else {
+            $lines.Add('')
+            $lines.Add("${ParentKey}:")
+            $lines.Add("  ${Key}: $targetValue")
+        }
+    }
+
+    [System.IO.File]::WriteAllText($configPath, (($lines -join "`r`n") + "`r`n"), [System.Text.Encoding]::UTF8)
+    return $true
 }
 
 function Add-STWhitelistEntry {
@@ -2648,6 +2715,7 @@ function Install-GuguTransitManager {
     Clear-Host
     Write-Header "安装/更新咕咕助手 - 中转管理"
     $serverPluginsEnabled = $false
+    $serverPluginsAutoUpdateEnabled = $false
 
     try {
         Initialize-FirstPartySources
@@ -2698,10 +2766,23 @@ function Install-GuguTransitManager {
     }
 
     $serverPluginsEnabled = (Get-STConfigValue "enableServerPlugins") -eq "true"
+    $serverPluginsAutoUpdateEnabled = (Get-STConfigValue "enableServerPluginsAutoUpdate") -eq "true"
     Write-GuguTransitInstallMarker
     if (-not $serverPluginsEnabled) {
-        Update-STConfigValue "enableServerPlugins" "true" | Out-Null
+        if (-not (Set-STRootBooleanValue "enableServerPlugins" $true)) {
+            Write-Error "开启酒馆后端插件失败，请检查 config.yaml 是否可写。"
+            Press-Any-Key
+            return
+        }
         Write-Warning "检测到酒馆后端插件原本未开启，已自动开启。"
+    }
+    if ($serverPluginsAutoUpdateEnabled) {
+        if (-not (Set-STRootBooleanValue "enableServerPluginsAutoUpdate" $false)) {
+            Write-Error "关闭后端插件自动更新失败，请检查 config.yaml 是否可写。"
+            Press-Any-Key
+            return
+        }
+        Write-Warning "已自动关闭后端插件自动更新，避免仓库异常阻塞酒馆启动。"
     }
 
     Write-Success "咕咕助手 - 中转管理 已安装/更新完成。"
@@ -3090,6 +3171,8 @@ function Show-STConfigMenu {
         $currUser = Get-STConfigValue "enableUserAccounts"
         $currListen = Get-STConfigValue "listen"
         $currServerPlugins = Get-STConfigValue "enableServerPlugins"
+        $currExtensionsAutoUpdate = Get-STNestedConfigValue "extensions" "autoUpdate"
+        $currServerPluginsAutoUpdate = Get-STConfigValue "enableServerPluginsAutoUpdate"
 
         $isSingleUser = ($currAuth -eq "true" -and $currUser -eq "false")
         $isMultiUser = ($currAuth -eq "false" -and $currUser -eq "true")
@@ -3111,6 +3194,10 @@ function Show-STConfigMenu {
         if ($currListen -eq "true") { Write-Host "已开启" -ForegroundColor Green } else { Write-Host "已关闭" -ForegroundColor Red }
         Write-Host "      后端插件: " -NoNewline
         if ($currServerPlugins -eq "true") { Write-Host "已开启" -ForegroundColor Green } else { Write-Host "已关闭" -ForegroundColor Red }
+        Write-Host "      前端自动更新: " -NoNewline
+        if ($currExtensionsAutoUpdate -eq "true") { Write-Host "已开启" -ForegroundColor Green } else { Write-Host "已关闭" -ForegroundColor Red }
+        Write-Host "      后端自动更新: " -NoNewline
+        if ($currServerPluginsAutoUpdate -eq "true") { Write-Host "已开启" -ForegroundColor Green } else { Write-Host "已关闭" -ForegroundColor Red }
 
         Write-Host "`n      [1] " -NoNewline; Write-Host "修改端口号" -ForegroundColor Cyan
         Write-Host "      [2] " -NoNewline; Write-Host "切换为：默认无账密模式" -ForegroundColor Cyan
@@ -3124,10 +3211,14 @@ function Show-STConfigMenu {
         if ($currListen -eq "true") { Write-Host "关闭局域网访问" -ForegroundColor Red } else { Write-Host "允许局域网访问 (需开启账密)" -ForegroundColor Yellow }
         Write-Host "      [6] " -NoNewline
         if ($currServerPlugins -eq "true") { Write-Host "关闭后端插件" -ForegroundColor Red } else { Write-Host "开启后端插件" -ForegroundColor Yellow }
+        Write-Host "      [7] " -NoNewline
+        if ($currExtensionsAutoUpdate -eq "true") { Write-Host "关闭前端扩展自动更新" -ForegroundColor Red } else { Write-Host "开启前端扩展自动更新" -ForegroundColor Yellow }
+        Write-Host "      [8] " -NoNewline
+        if ($currServerPluginsAutoUpdate -eq "true") { Write-Host "关闭后端插件自动更新" -ForegroundColor Red } else { Write-Host "开启后端插件自动更新" -ForegroundColor Yellow }
         
         Write-Host "`n      [0] " -NoNewline; Write-Host "返回主菜单" -ForegroundColor Cyan
 
-        $choice = Read-MenuPrompt -Allowed "0-6"
+        $choice = Read-MenuPrompt -Allowed "0-8"
         switch ($choice) {
             "1" {
                 $newPort = Read-TextPrompt -Label "端口号" -Hint "1024-65535"
@@ -3263,6 +3354,40 @@ function Show-STConfigMenu {
                 } else {
                     Update-STConfigValue "enableServerPlugins" "true" | Out-Null
                     Write-Success "后端插件已开启。"
+                }
+                Write-Warning "设置将在重启酒馆后生效。"
+                Press-Any-Key
+            }
+            "7" {
+                if ($currExtensionsAutoUpdate -eq "true") {
+                    if (Set-STNestedBooleanValue "extensions" "autoUpdate" $false) {
+                        Write-Success "前端扩展自动更新已关闭。"
+                    } else {
+                        Write-Error "前端扩展自动更新写入失败。"
+                    }
+                } else {
+                    if (Set-STNestedBooleanValue "extensions" "autoUpdate" $true) {
+                        Write-Success "前端扩展自动更新已开启。"
+                    } else {
+                        Write-Error "前端扩展自动更新写入失败。"
+                    }
+                }
+                Write-Warning "设置将在重启酒馆后生效。"
+                Press-Any-Key
+            }
+            "8" {
+                if ($currServerPluginsAutoUpdate -eq "true") {
+                    if (Set-STRootBooleanValue "enableServerPluginsAutoUpdate" $false) {
+                        Write-Success "后端插件自动更新已关闭。"
+                    } else {
+                        Write-Error "后端插件自动更新写入失败。"
+                    }
+                } else {
+                    if (Set-STRootBooleanValue "enableServerPluginsAutoUpdate" $true) {
+                        Write-Success "后端插件自动更新已开启。"
+                    } else {
+                        Write-Error "后端插件自动更新写入失败。"
+                    }
                 }
                 Write-Warning "设置将在重启酒馆后生效。"
                 Press-Any-Key
