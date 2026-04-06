@@ -7,7 +7,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-$ScriptVersion = "v5.26"
+$ScriptVersion = "v5.27"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -591,6 +591,14 @@ function Get-STRecommendedHeapLimitMb {
     }
 }
 
+function Write-FileUtf8NoBom {
+    param(
+        [string]$Path,
+        [string]$Content
+    )
+    [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
+}
+
 function Set-STStartHeapLimit {
     param([int]$HeapMb)
     $startBatPath = Join-Path $ST_Dir "Start.bat"
@@ -605,7 +613,7 @@ function Set-STStartHeapLimit {
     }
 
     if ($newContent -eq $content) { return $false }
-    [System.IO.File]::WriteAllText($startBatPath, $newContent, [System.Text.Encoding]::UTF8)
+    Write-FileUtf8NoBom -Path $startBatPath -Content $newContent
     return $true
 }
 
@@ -616,7 +624,7 @@ function Clear-STStartHeapLimit {
     $content = Get-Content $startBatPath -Raw
     $newContent = $content -replace '\s+--max-old-space-size=\d+', ''
     if ($newContent -eq $content) { return $true }
-    [System.IO.File]::WriteAllText($startBatPath, $newContent, [System.Text.Encoding]::UTF8)
+    Write-FileUtf8NoBom -Path $startBatPath -Content $newContent
     return $true
 }
 
