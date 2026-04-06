@@ -75,6 +75,8 @@ readonly AIS2API_NEW_IMAGE_REPO="ghcr.io/ibuhub/aistudio-to-api"
 readonly AIS2API_NEW_IMAGE="ghcr.io/ibuhub/aistudio-to-api:latest"
 readonly ONEPANEL_TMP_DIR="/opt/1panel/backup/tmp"
 readonly ONEPANEL_TMP_RETENTION_DAYS=7
+SYSTEM_CLEANUP_1PANEL_STATUS=""
+SYSTEM_CLEANUP_1PANEL_DELETED_COUNT=0
 ST_TRANSIT_FRONTEND_REPO_URL=""
 ST_TRANSIT_BACKEND_REPO_URL=""
 
@@ -815,7 +817,47 @@ EOF
 }
 
 
+fn_get_root_available_kib() {
+    df -Pk / | awk 'NR==2 { print $4 }'
+}
+
+
+fn_format_kib_to_human() {
+    local kib="$1"
+    if [[ ! "$kib" =~ ^[0-9]+$ ]]; then
+        echo "未知"
+        return 0
+    fi
+    awk -v kib="$kib" 'BEGIN {
+        if (kib >= 1048576) {
+            printf "%.2f GB", kib / 1048576
+        } else if (kib >= 1024) {
+            printf "%.2f MB", kib / 1024
+        } else {
+            printf "%d KB", kib
+        }
+    }'
+}
+
+
+fn_print_system_cleanup_report() {
+    local before_kib="$1"
+    local after_kib="$2"
+    local docker_status="$3"
+    echo -e "\n${CYAN}================ 系统安全清理报告 ================${NC}"
+    echo -e "  apt 缓存        : 已完成"
+    echo -e "  journald 日志   : 已完成"
+    echo -e "  Docker 系统     : ${docker_status}"
+    echo -e "  1Panel 临时文件 : ${SYSTEM_CLEANUP_1PANEL_STATUS}"
+    echo -e "  1Panel 删除数量 : ${SYSTEM_CLEANUP_1PANEL_DELETED_COUNT}"
+    echo -e "  根分区可用空间  : $(fn_format_kib_to_human "$before_kib") -> $(fn_format_kib_to_human "$after_kib")"
+    echo -e "${CYAN}==================================================${NC}"
+}
+
+
 fn_cleanup_1panel_tmp_files() {
+    SYSTEM_CLEANUP_1PANEL_STATUS="已跳过（未检测到目录）"
+    SYSTEM_CLEANUP_1PANEL_DELETED_COUNT=0
     if [ ! -d "$ONEPANEL_TMP_DIR" ]; then
         log_info "未检测到 1Panel 临时备份目录，已跳过该清理项。"
         return 0
@@ -830,12 +872,15 @@ fn_cleanup_1panel_tmp_files() {
     fi
 
     if [ "$expired_count" -eq 0 ]; then
+        SYSTEM_CLEANUP_1PANEL_STATUS="已完成（无过期文件）"
         log_info "1Panel 临时备份目录中没有超过 ${ONEPANEL_TMP_RETENTION_DAYS} 天的文件。"
         return 0
     fi
 
     log_info "正在清理 1Panel 临时备份目录中超过 ${ONEPANEL_TMP_RETENTION_DAYS} 天的文件..."
     if find "$ONEPANEL_TMP_DIR" -type f -mtime +"$ONEPANEL_TMP_RETENTION_DAYS" -delete; then
+        SYSTEM_CLEANUP_1PANEL_STATUS="已完成"
+        SYSTEM_CLEANUP_1PANEL_DELETED_COUNT="$expired_count"
         log_success "1Panel 临时备份目录清理完成，共删除 ${expired_count} 个文件。"
     else
         log_error "清理 1Panel 临时备份目录失败！" || return 1
@@ -844,6 +889,9 @@ fn_cleanup_1panel_tmp_files() {
 
 
 run_system_cleanup() {
+    local before_free_kib
+    local after_free_kib
+    local docker_status="已跳过（未检测到 Docker）"
     log_action "即将执行系统安全清理..."
     echo -e "此操作将执行以下命令："
     echo -e "  - ${CYAN}apt-get clean -y${NC} (清理apt缓存)"
@@ -860,25 +908,31 @@ run_system_cleanup() {
         return
     fi
 
+    before_free_kib=$(fn_get_root_available_kib)
+
     log_info "正在清理 apt 缓存..."
-    apt-get clean -y
+    apt-get clean -y || { log_error "apt 缓存清理失败！" || return 1; }
     log_success "apt 缓存清理完成。"
 
     log_info "正在压缩 journald 日志..."
-    journalctl --vacuum-size=100M
+    journalctl --vacuum-size=100M || { log_error "journald 日志压缩失败！" || return 1; }
     log_success "journald 日志压缩完成。"
 
     if command -v docker &> /dev/null; then
         log_info "正在清理 Docker 系统..."
-        docker system prune -f
+        docker system prune -f || { log_error "Docker 系统清理失败！" || return 1; }
+        docker_status="已完成"
         log_success "Docker 系统清理完成。"
     else
         log_warn "未检测到 Docker，已跳过 Docker 系统清理步骤。"
     fi
 
-    fn_cleanup_1panel_tmp_files
+    fn_cleanup_1panel_tmp_files || return 1
+    after_free_kib=$(fn_get_root_available_kib)
 
     log_info "系统安全清理已全部完成！"
+    fn_print_system_cleanup_report "$before_free_kib" "$after_free_kib" "$docker_status"
+    read -rp "清理报告已显示，按 Enter 返回..." < /dev/tty
 }
 
 
