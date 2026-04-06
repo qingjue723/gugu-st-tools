@@ -12,7 +12,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-readonly SCRIPT_VERSION="v5.13test"
+readonly SCRIPT_VERSION="v5.25test"
 GUGU_MODE="test"
 
 if [ "$GUGU_MODE" = "prod" ]; then
@@ -2264,7 +2264,7 @@ fn_st_show_transit_status() {
     echo -e "前端扩展: ${YELLOW}$(fn_st_get_transit_repo_state_label "$frontend_state")${NC}"
     echo -e "后端插件: ${YELLOW}$(fn_st_get_transit_repo_state_label "$backend_state")${NC}"
     echo -e "后端开关: $(if fn_st_is_server_plugin_enabled "$config_file"; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi)"
-    echo -e "后端自动更新: $(if fn_st_is_server_plugin_auto_update_enabled "$config_file"; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi)"
+    echo -e "后端自动更新(无法启动时建议关闭): $(if fn_st_is_server_plugin_auto_update_enabled "$config_file"; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi)"
     echo -e "前端目录: ${CYAN}${frontend_dir}${NC}"
     echo -e "后端目录: ${CYAN}${backend_dir}${NC}"
     echo -e "前端源: ${CYAN}${frontend_origin:-未安装}${NC}"
@@ -4217,7 +4217,7 @@ fn_st_docker_manager() {
         if [ "$is_beautified" = true ]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
         echo -ne "前端自动更新: "
         if [ "$frontend_auto_update_enabled" = true ]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
-        echo -ne "后端自动更新: "
+        echo -ne "后端自动更新(无法启动时建议关闭): "
         if [ "$server_plugin_auto_update_enabled" = true ]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
         echo -e "------------------------"
         echo -e "  [1] 重启酒馆 (restart)"
@@ -4248,9 +4248,9 @@ fn_st_docker_manager() {
             echo -e "  [12] ${YELLOW}开启前端扩展自动更新${NC}"
         fi
         if [ "$server_plugin_auto_update_enabled" = true ]; then
-            echo -e "  [13] ${RED}关闭后端插件自动更新${NC}"
+            echo -e "  [13] ${RED}关闭后端插件自动更新(无法启动时建议关闭)${NC}"
         else
-            echo -e "  [13] ${YELLOW}开启后端插件自动更新${NC}"
+            echo -e "  [13] ${YELLOW}开启后端插件自动更新(无法启动时建议关闭)${NC}"
         fi
         echo -e "  [x] 彻底卸载酒馆"
         echo -e "  [0] 返回上一级"

@@ -7,7 +7,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-$ScriptVersion = "v5.24"
+$ScriptVersion = "v5.25"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -3196,7 +3196,7 @@ function Show-STConfigMenu {
         if ($currServerPlugins -eq "true") { Write-Host "已开启" -ForegroundColor Green } else { Write-Host "已关闭" -ForegroundColor Red }
         Write-Host "      前端自动更新: " -NoNewline
         if ($currExtensionsAutoUpdate -eq "true") { Write-Host "已开启" -ForegroundColor Green } else { Write-Host "已关闭" -ForegroundColor Red }
-        Write-Host "      后端自动更新: " -NoNewline
+        Write-Host "      后端自动更新(无法启动时建议关闭): " -NoNewline
         if ($currServerPluginsAutoUpdate -eq "true") { Write-Host "已开启" -ForegroundColor Green } else { Write-Host "已关闭" -ForegroundColor Red }
 
         Write-Host "`n      [1] " -NoNewline; Write-Host "修改端口号" -ForegroundColor Cyan
@@ -3214,7 +3214,7 @@ function Show-STConfigMenu {
         Write-Host "      [7] " -NoNewline
         if ($currExtensionsAutoUpdate -eq "true") { Write-Host "关闭前端扩展自动更新" -ForegroundColor Red } else { Write-Host "开启前端扩展自动更新" -ForegroundColor Yellow }
         Write-Host "      [8] " -NoNewline
-        if ($currServerPluginsAutoUpdate -eq "true") { Write-Host "关闭后端插件自动更新" -ForegroundColor Red } else { Write-Host "开启后端插件自动更新" -ForegroundColor Yellow }
+        if ($currServerPluginsAutoUpdate -eq "true") { Write-Host "关闭后端插件自动更新(无法启动时建议关闭)" -ForegroundColor Red } else { Write-Host "开启后端插件自动更新(无法启动时建议关闭)" -ForegroundColor Yellow }
         
         Write-Host "`n      [0] " -NoNewline; Write-Host "返回主菜单" -ForegroundColor Cyan
 

@@ -84,7 +84,7 @@ GIT_LAST_LOG_FILE=""
 PKG_NONINTERACTIVE_NOTICE_SHOWN="false"
 
 fn_show_main_header() {
-    echo -e "    ${YELLOW}>>${GREEN} 清绝咕咕助手 v5.23${NC}"
+    echo -e "    ${YELLOW}>>${GREEN} 清绝咕咕助手 v5.25${NC}"
     echo -e "       ${BOLD}\033[0;37m作者: 清绝 | 网址: blog.qjyg.de${NC}"
     echo -e "    ${RED}本脚本为免费工具，严禁用于商业倒卖！${NC}"
 }
@@ -3202,7 +3202,7 @@ fn_menu_st_config() {
         if [[ "$curr_server_plugins" == "true" ]]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
         echo -en "      前端自动更新: "
         if [[ "$curr_extensions_auto_update" == "true" ]]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
-        echo -en "      后端自动更新: "
+        echo -en "      后端自动更新(无法启动时建议关闭): "
         if [[ "$curr_server_plugins_auto_update" == "true" ]]; then echo -e "${GREEN}已开启${NC}"; else echo -e "${RED}已关闭${NC}"; fi
 
         echo -e "\n      [1] ${CYAN}修改端口号${NC}"
@@ -3232,9 +3232,9 @@ fn_menu_st_config() {
             echo -e "      [7] ${YELLOW}开启前端扩展自动更新${NC}"
         fi
         if [[ "$curr_server_plugins_auto_update" == "true" ]]; then
-            echo -e "      [8] ${RED}关闭后端插件自动更新${NC}"
+            echo -e "      [8] ${RED}关闭后端插件自动更新(无法启动时建议关闭)${NC}"
         else
-            echo -e "      [8] ${YELLOW}开启后端插件自动更新${NC}"
+            echo -e "      [8] ${YELLOW}开启后端插件自动更新(无法启动时建议关闭)${NC}"
         fi
         
         echo -e "\n      [0] ${CYAN}返回上一级${NC}"
