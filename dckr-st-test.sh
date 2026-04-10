@@ -642,14 +642,34 @@ fn_uninstall_docker_app() {
 
 fn_check_in_china() {
     log_info "正在判断服务器地理位置..."
-    # 通过测试 google.com 的连通性来判断是否在大陆
-    if curl -s --connect-timeout 3 https://www.google.com > /dev/null; then
-        log_success "检测到服务器位于海外，将直接使用官方 Docker 源。"
+    local google_targets=(
+        "www.google.com/robots.txt|https://www.google.com/robots.txt"
+        "accounts.google.com|https://accounts.google.com/"
+    )
+    local total_count="${#google_targets[@]}"
+    local passed_count=0
+    local failed_targets=()
+    local target label url
+
+    for target in "${google_targets[@]}"; do
+        IFS='|' read -r label url <<<"$target"
+        if curl -fsL -o /dev/null -s --connect-timeout 3 --max-time 6 "$url"; then
+            passed_count=$((passed_count + 1))
+            continue
+        fi
+        failed_targets+=("$label")
+    done
+
+    if [[ "$passed_count" -eq "$total_count" ]]; then
+        log_success "Google 地理位置检测结果：${passed_count}/${total_count} 成功，判定服务器位于海外，将直接使用官方 Docker 源。"
         return 1 # 不在大陆
-    else
-        log_warn "检测到服务器位于中国大陆，建议配置镜像加速。"
-        return 0 # 在大陆
     fi
+
+    local failed_text
+    failed_text="$(IFS=','; echo "${failed_targets[*]}")"
+    log_warn "Google 地理位置检测结果：${passed_count}/${total_count} 成功，判定服务器位于中国大陆，建议配置镜像加速。"
+    [[ -n "$failed_text" ]] && log_info "失败目标: ${failed_text}"
+    return 0 # 在大陆
 }
 
 fn_optimize_docker() {

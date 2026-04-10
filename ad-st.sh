@@ -34,7 +34,7 @@ ST_DIR="$HOME/SillyTavern"
 BACKUP_ROOT_DIR="$HOME/SillyTavern_Backups"
 REPO_BRANCH="release"
 BACKUP_LIMIT=10
-readonly SCRIPT_VERSION="v5.27"
+readonly SCRIPT_VERSION="v5.28"
 SCRIPT_SELF_PATH=$(readlink -f "$0")
 readonly SOURCE_MANIFEST_URL="https://gugu.qjyg.de/source-manifest.json"
 readonly FIRST_PARTY_SCRIPT_KEY="ad_st"
@@ -781,21 +781,39 @@ fn_elapsed_is_le() {
 }
 
 fn_test_google_reachability() {
-    local google_urls=(
-        "https://www.gstatic.com/generate_204"
-        "https://www.google.com/generate_204"
+    local google_targets=(
+        "www.google.com/robots.txt|https://www.google.com/robots.txt"
+        "accounts.google.com|https://accounts.google.com/"
     )
 
-    local url elapsed fluent
-    for url in "${google_urls[@]}"; do
-        elapsed="$(fn_invoke_web_probe "$url" 6)" && [[ -n "$elapsed" ]] || continue
-        fluent="false"
-        if fn_elapsed_is_le "$elapsed" "2.5"; then
-            fluent="true"
+    local total_count="${#google_targets[@]}"
+    local passed_count=0
+    local max_elapsed=""
+    local successful_targets=()
+    local failed_targets=()
+    local target label url elapsed
+
+    for target in "${google_targets[@]}"; do
+        IFS='|' read -r label url <<<"$target"
+        if elapsed="$(fn_invoke_web_probe "$url" 6)" && [[ -n "$elapsed" ]]; then
+            successful_targets+=("$label")
+            passed_count=$((passed_count + 1))
+            if [[ -z "$max_elapsed" ]] || ! fn_elapsed_is_le "$elapsed" "$max_elapsed"; then
+                max_elapsed="$elapsed"
+            fi
+            continue
         fi
-        echo "${url}|${elapsed}|${fluent}"
-        return 0
+        failed_targets+=("$label")
     done
+
+    local successful_text failed_text
+    successful_text="$(IFS=','; echo "${successful_targets[*]}")"
+    failed_text="$(IFS=','; echo "${failed_targets[*]}")"
+    echo "${passed_count}|${total_count}|${max_elapsed}|${successful_text}|${failed_text}"
+
+    if [[ "$passed_count" -eq "$total_count" ]]; then
+        return 0
+    fi
     return 1
 }
 
@@ -806,17 +824,17 @@ fn_assert_github_direct_connectivity() {
         return 1
     fi
 
-    fn_print_warning "正在检测 Google 访问情况..."
-    local google_probe google_url google_elapsed google_fluent
-    if google_probe="$(fn_test_google_reachability)"; then
-        IFS='|' read -r google_url google_elapsed google_fluent <<<"$google_probe"
-        if [[ "$google_fluent" == "true" ]]; then
-            fn_print_success "Google 检测通过 (${google_url}，耗时 $(fn_format_seconds "$google_elapsed"))。"
-        else
-            fn_print_warning "Google 可访问但不够流畅 (${google_url}，耗时 $(fn_format_seconds "$google_elapsed"))。"
-        fi
+    fn_print_warning "正在通过 Google 探测判断地理位置..."
+    local google_probe google_status google_passed google_total google_elapsed google_successful google_failed
+    google_probe="$(fn_test_google_reachability)"
+    google_status=$?
+    IFS='|' read -r google_passed google_total google_elapsed google_successful google_failed <<<"$google_probe"
+    if [[ "$google_status" -eq 0 ]]; then
+        fn_print_success "Google 地理位置检测结果：判定为海外 (${google_passed}/${google_total}，目标 ${google_successful}，耗时 $(fn_format_seconds "$google_elapsed"))。"
     else
-        fn_print_warning "Google 探测失败，继续检测 GitHub 官方线路。"
+        [[ -z "$google_failed" ]] && google_failed="未知"
+        fn_print_warning "Google 地理位置检测结果：判定为中国大陆 (${google_passed:-0}/${google_total:-2}，失败目标 ${google_failed})。"
+        fn_print_warning "继续检测 GitHub 官方线路。"
     fi
 
     fn_print_warning "正在检测 GitHub 官方线路连通性..."
@@ -990,23 +1008,23 @@ fn_resolve_download_route() {
         return 1
     fi
 
-    local google_probe google_url google_elapsed google_fluent
-    fn_print_warning "正在检测 Google 可达性（用于判断是否建议 GitHub 官方线路）..."
-    if google_probe="$(fn_test_google_reachability)"; then
-        IFS='|' read -r google_url google_elapsed google_fluent <<<"$google_probe"
-        if [[ "$google_fluent" == "true" ]]; then
-            fn_print_success "Google 检测结果：可流畅访问 (${google_url}，耗时 $(fn_format_seconds "$google_elapsed"))。" >&2
-            fn_print_warning "判定：建议优先使用 GitHub 官方线路；输入 n 将进入镜像测速。"
-            if fn_read_yes_no_prompt "是否使用 GitHub 官方线路（推荐）" true "回车=是；输入 n=测速镜像并手动选择。"; then
-                echo "github.com|${git_url}"
-                return 0
-            fi
-        else
-            fn_print_warning "Google 检测结果：可访问但不够流畅 (${google_url}，耗时 $(fn_format_seconds "$google_elapsed"))。"
-            fn_print_warning "判定：跳过 GitHub 直连询问，直接测速全部镜像线路。"
+    local google_probe google_status google_passed google_total google_elapsed google_successful google_failed
+    local google_is_overseas="false"
+    fn_print_warning "正在通过 Google 探测判断地理位置（用于判断是否建议 GitHub 官方线路）..."
+    google_probe="$(fn_test_google_reachability)"
+    google_status=$?
+    IFS='|' read -r google_passed google_total google_elapsed google_successful google_failed <<<"$google_probe"
+    if [[ "$google_status" -eq 0 ]]; then
+        google_is_overseas="true"
+        fn_print_success "Google 地理位置检测结果：判定为海外 (${google_passed}/${google_total}，目标 ${google_successful}，耗时 $(fn_format_seconds "$google_elapsed"))。" >&2
+        fn_print_warning "判定：建议优先使用 GitHub 官方线路；输入 n 将进入镜像测速。"
+        if fn_read_yes_no_prompt "是否使用 GitHub 官方线路（推荐）" true "回车=是；输入 n=测速镜像并手动选择。"; then
+            echo "github.com|${git_url}"
+            return 0
         fi
     else
-        fn_print_warning "Google 检测结果：不可达或超时。"
+        [[ -z "$google_failed" ]] && google_failed="未知"
+        fn_print_warning "Google 地理位置检测结果：判定为中国大陆 (${google_passed:-0}/${google_total:-2}，失败目标 ${google_failed})。"
         fn_print_warning "判定：按国内环境直接测速全部镜像线路。"
     fi
 
@@ -1046,7 +1064,7 @@ fn_resolve_download_route() {
     if [[ ${#successful[@]} -eq 0 ]]; then
         fn_print_error "所有线路测速失败。"
         fn_write_git_network_troubleshooting
-        if [[ "$google_fluent" == "true" ]]; then
+        if [[ "$google_is_overseas" == "true" ]]; then
             fn_print_warning "如需改用 GitHub 官方线路，请重新执行本操作。"
         fi
         return 1

@@ -7,7 +7,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-$ScriptVersion = "v5.27"
+$ScriptVersion = "v5.28"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -958,37 +958,51 @@ function Assert-BasicInternetConnectivity {
 }
 
 function Test-GoogleReachability {
-    param([int]$FluentThresholdMs = 2500)
-
-    $googleUrls = @(
-        "https://www.gstatic.com/generate_204",
-        "https://www.google.com/generate_204"
+    $googleTargets = @(
+        [PSCustomObject]@{ Name = 'www.google.com/robots.txt'; Url = 'https://www.google.com/robots.txt' },
+        [PSCustomObject]@{ Name = 'accounts.google.com'; Url = 'https://accounts.google.com/' }
     )
 
-    $lastResult = $null
-    foreach ($googleUrl in $googleUrls) {
-        $probeResult = Invoke-WebProbe -Url $googleUrl -TimeoutSeconds 6
+    $successfulTargets = New-Object System.Collections.Generic.List[string]
+    $failedTargets = New-Object System.Collections.Generic.List[string]
+    $maxElapsedMs = $null
+
+    foreach ($googleTarget in $googleTargets) {
+        $probeResult = Invoke-WebProbe -Url $googleTarget.Url -TimeoutSeconds 6
         if ($probeResult.Success) {
-            return [PSCustomObject]@{
-                Success    = $true
-                Fluent     = ($probeResult.ElapsedMs -le $FluentThresholdMs)
-                Url        = $probeResult.Url
-                ElapsedMs  = $probeResult.ElapsedMs
-                StatusCode = $probeResult.StatusCode
-                Error      = $null
+            [void]$successfulTargets.Add($googleTarget.Name)
+            if ($null -eq $maxElapsedMs -or $probeResult.ElapsedMs -gt $maxElapsedMs) {
+                $maxElapsedMs = $probeResult.ElapsedMs
             }
+            continue
         }
-        $lastResult = $probeResult
+        [void]$failedTargets.Add($googleTarget.Name)
     }
 
+    $passedCount = $successfulTargets.Count
+    $totalCount = $googleTargets.Count
     return [PSCustomObject]@{
-        Success    = $false
-        Fluent     = $false
-        Url        = if ($lastResult) { $lastResult.Url } else { $googleUrls[0] }
-        ElapsedMs  = if ($lastResult) { $lastResult.ElapsedMs } else { $null }
-        StatusCode = if ($lastResult) { $lastResult.StatusCode } else { $null }
-        Error      = if ($lastResult) { $lastResult.Error } else { "Google 探测失败。" }
+        Success           = ($passedCount -eq $totalCount)
+        PassedCount       = $passedCount
+        TotalCount        = $totalCount
+        ElapsedMs         = $maxElapsedMs
+        SuccessfulTargets = @($successfulTargets)
+        FailedTargets     = @($failedTargets)
+        Error             = if ($passedCount -eq $totalCount) { $null } else { "Google 地理位置探测未全部通过。" }
     }
+}
+
+function Format-GoogleProbeTargets {
+    param(
+        [string[]]$Targets,
+        [string]$Fallback = "未知"
+    )
+
+    if ($Targets -and $Targets.Count -gt 0) {
+        return ($Targets -join ", ")
+    }
+
+    return $Fallback
 }
 
 function Test-GitHubDirectReachability {
@@ -1022,16 +1036,15 @@ function Assert-GitHubDirectConnectivity {
     $networkProbe = Assert-BasicInternetConnectivity -OperationName $OperationName
     if (-not $networkProbe) { return $null }
 
-    Write-Warning "正在检测 Google 访问情况..."
+    Write-Warning "正在通过 Google 探测判断地理位置..."
     $googleProbe = Test-GoogleReachability
     if ($googleProbe.Success) {
-        if ($googleProbe.Fluent) {
-            Write-Success "Google 检测通过 ($($googleProbe.Url)，耗时 $(Format-ElapsedTime $googleProbe.ElapsedMs))。"
-        } else {
-            Write-Warning "Google 可访问但不够流畅 ($($googleProbe.Url)，耗时 $(Format-ElapsedTime $googleProbe.ElapsedMs))。"
-        }
+        $successfulTargets = Format-GoogleProbeTargets -Targets $googleProbe.SuccessfulTargets
+        Write-Success "Google 地理位置检测结果：判定为海外 ($($googleProbe.PassedCount)/$($googleProbe.TotalCount)，目标 $successfulTargets，耗时 $(Format-ElapsedTime $googleProbe.ElapsedMs))。"
     } else {
-        Write-Warning "Google 探测失败，继续检测 GitHub 官方线路。"
+        $failedTargets = Format-GoogleProbeTargets -Targets $googleProbe.FailedTargets
+        Write-Warning "Google 地理位置检测结果：判定为中国大陆 ($($googleProbe.PassedCount)/$($googleProbe.TotalCount)，失败目标 $failedTargets)。"
+        Write-Warning "继续检测 GitHub 官方线路。"
     }
 
     Write-Warning "正在检测 GitHub 官方线路连通性..."
@@ -1280,17 +1293,16 @@ function Resolve-DownloadRoute {
     $mirrorCandidates = @($candidates | Where-Object { -not $_.IsOfficial })
 
     $googleProbe = Test-GoogleReachability
-    if ($googleProbe.Fluent) {
-        Write-Success "检测到 Google 可流畅访问 ($($googleProbe.Url)，耗时 $(Format-ElapsedTime $googleProbe.ElapsedMs))。"
+    if ($googleProbe.Success) {
+        $successfulTargets = Format-GoogleProbeTargets -Targets $googleProbe.SuccessfulTargets
+        Write-Success "Google 地理位置检测结果：判定为海外 ($($googleProbe.PassedCount)/$($googleProbe.TotalCount)，目标 $successfulTargets，耗时 $(Format-ElapsedTime $googleProbe.ElapsedMs))。"
         if (Read-YesNoPrompt -Label "使用 GitHub 官方线路" -DefaultYes $true -Note "输入 n 将测速镜像。") {
             return $officialCandidate
         }
     } else {
-        if ($googleProbe.Success) {
-            Write-Warning "检测到 Google 可访问但不够流畅 ($(Format-ElapsedTime $googleProbe.ElapsedMs))，将直接测速全部镜像。"
-        } else {
-            Write-Warning "检测到 Google 无法流畅访问，将按国内环境直接测速全部镜像。"
-        }
+        $failedTargets = Format-GoogleProbeTargets -Targets $googleProbe.FailedTargets
+        Write-Warning "Google 地理位置检测结果：判定为中国大陆 ($($googleProbe.PassedCount)/$($googleProbe.TotalCount)，失败目标 $failedTargets)。"
+        Write-Warning "判定：按国内环境直接测速全部镜像。"
     }
 
     if ($mirrorCandidates.Count -eq 0) {
@@ -1303,7 +1315,7 @@ function Resolve-DownloadRoute {
     $successfulCandidates = @(Show-DownloadMeasurementSummary -Results $measuredCandidates -RequireGit:$requireGit -RequireFile:$requireFile)
     if ($successfulCandidates.Count -eq 0) {
         Write-Error "所有镜像线路测速失败。"
-        if ($googleProbe.Fluent) {
+        if ($googleProbe.Success) {
             Write-Warning "如需改用 GitHub 官方线路，请重新执行本操作。"
         }
         return $null
