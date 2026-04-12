@@ -34,7 +34,7 @@ ST_DIR="$HOME/SillyTavern"
 BACKUP_ROOT_DIR="$HOME/SillyTavern_Backups"
 REPO_BRANCH="release"
 BACKUP_LIMIT=10
-readonly SCRIPT_VERSION="v5.28"
+readonly SCRIPT_VERSION="v5.30"
 SCRIPT_SELF_PATH=$(readlink -f "$0")
 readonly SOURCE_MANIFEST_URL="https://gugu.qjyg.de/source-manifest.json"
 readonly FIRST_PARTY_SCRIPT_KEY="ad_st"
@@ -54,6 +54,13 @@ AGREEMENT_FILE="$CONFIG_DIR/.agreement_shown"
 GCLI_DIR="$HOME/gcli2api"
 SCRIPT_BASE_DIR="$(dirname "$SCRIPT_SELF_PATH")"
 GUGU_TRANSIT_ROUTE_MODE_KEY="GUGU_TRANSIT_ROUTE_MODE"
+readonly GUGU_TRANSIT_ROUTE_MODE_FOLLOW="follow"
+readonly GUGU_TRANSIT_ROUTE_MODE_GITHUB="github"
+readonly GUGU_TRANSIT_ROUTE_MODE_GITEE="gitee"
+readonly GUGU_TRANSIT_EXT_REPO_GITHUB_URL="https://github.com/qingjue723/gugu-transit-manager.git"
+readonly GUGU_TRANSIT_PLUGIN_REPO_GITHUB_URL="https://github.com/qingjue723/gugu-transit-manager-plugin.git"
+readonly GUGU_TRANSIT_EXT_REPO_GITEE_URL="https://gitee.com/canaan723/gugu-transit-manager.git"
+readonly GUGU_TRANSIT_PLUGIN_REPO_GITEE_URL="https://gitee.com/canaan723/gugu-transit-manager-plugin.git"
 GUGU_TRANSIT_EXT_REPO_URL=""
 GUGU_TRANSIT_PLUGIN_REPO_URL=""
 GUGU_TRANSIT_EXT_TARGET="$ST_DIR/public/scripts/extensions/third-party/gugu-transit-manager"
@@ -1252,7 +1259,7 @@ fn_git_backup_to_cloud() {
 
     local push_url
     if ! push_url="$(fn_get_authenticated_github_url "$REPO_URL" "$REPO_TOKEN")"; then
-        fn_print_error "当前仅支持 GitHub HTTPS 仓库进行云端备份。"
+        fn_print_error "云端备份独立于发布源，当前仅支持 GitHub HTTPS 私有仓库。"
         fn_press_any_key
         return
     fi
@@ -1387,7 +1394,7 @@ fn_git_restore_from_cloud() {
 
     local pull_url
     if ! pull_url="$(fn_get_authenticated_github_url "$REPO_URL" "$REPO_TOKEN")"; then
-        fn_print_error "当前仅支持 GitHub HTTPS 仓库进行云端恢复。"
+        fn_print_error "云端恢复独立于发布源，当前仅支持 GitHub HTTPS 私有仓库。"
         fn_press_any_key
         return
     fi
@@ -2777,12 +2784,47 @@ EOF
 }
 
 fn_resolve_gugu_transit_route() {
+    local local_mode
+    local_mode="$(fn_get_gugu_transit_route_mode)"
+    case "$local_mode" in
+        "$GUGU_TRANSIT_ROUTE_MODE_GITHUB"|"$GUGU_TRANSIT_ROUTE_MODE_GITEE")
+            echo "$local_mode"
+            return
+            ;;
+    esac
+
     if ! fn_load_first_party_sources; then
         echo "unknown"
         return
     fi
 
     echo "$SOURCE_PROVIDER"
+}
+
+fn_get_gugu_transit_route_mode() {
+    if [[ ! -f "$LAB_CONFIG_FILE" ]]; then
+        echo "$GUGU_TRANSIT_ROUTE_MODE_FOLLOW"
+        return
+    fi
+
+    local route_mode
+    route_mode="$(sed -n "s/^${GUGU_TRANSIT_ROUTE_MODE_KEY}=\"\\([^\"]*\\)\"$/\\1/p" "$LAB_CONFIG_FILE" | tail -n 1)"
+    case "$route_mode" in
+        "$GUGU_TRANSIT_ROUTE_MODE_GITHUB"|"$GUGU_TRANSIT_ROUTE_MODE_GITEE"|"$GUGU_TRANSIT_ROUTE_MODE_FOLLOW")
+            echo "$route_mode"
+            ;;
+        *)
+            echo "$GUGU_TRANSIT_ROUTE_MODE_FOLLOW"
+            ;;
+    esac
+}
+
+fn_set_gugu_transit_route_mode() {
+    local route_mode="$1"
+    mkdir -p "$CONFIG_DIR"
+    touch "$LAB_CONFIG_FILE"
+    sed -i "/^${GUGU_TRANSIT_ROUTE_MODE_KEY}=/d" "$LAB_CONFIG_FILE"
+    echo "${GUGU_TRANSIT_ROUTE_MODE_KEY}=\"${route_mode}\"" >> "$LAB_CONFIG_FILE"
 }
 
 fn_get_gugu_transit_route_label() {
@@ -2795,19 +2837,47 @@ fn_get_gugu_transit_route_label() {
 }
 
 fn_get_gugu_transit_route_mode_label() {
-    local route_label
-    route_label="$(fn_get_gugu_transit_route_label "$(fn_resolve_gugu_transit_route)")"
+    local route_mode route_label
+    route_mode="$(fn_get_gugu_transit_route_mode)"
+    if [[ "$route_mode" == "$GUGU_TRANSIT_ROUTE_MODE_GITHUB" ]]; then
+        echo "本地固定：GitHub"
+        return
+    fi
+    if [[ "$route_mode" == "$GUGU_TRANSIT_ROUTE_MODE_GITEE" ]]; then
+        echo "本地固定：Gitee"
+        return
+    fi
 
+    route_label="$(fn_get_gugu_transit_route_label "$(fn_resolve_gugu_transit_route)")"
     if [[ "$route_label" == "未知" ]]; then
         echo "跟随服务器（当前不可用）"
-    else
-        echo "跟随服务器（当前：${route_label}）"
+        return
     fi
+    echo "跟随服务器（当前：${route_label}）"
 }
 
 fn_get_gugu_transit_repo_url() {
     local route="$1"
     local component="$2"
+
+    case "$route" in
+        "$GUGU_TRANSIT_ROUTE_MODE_GITHUB")
+            if [[ "$component" == "frontend" ]]; then
+                echo "$GUGU_TRANSIT_EXT_REPO_GITHUB_URL"
+            else
+                echo "$GUGU_TRANSIT_PLUGIN_REPO_GITHUB_URL"
+            fi
+            return
+            ;;
+        "$GUGU_TRANSIT_ROUTE_MODE_GITEE")
+            if [[ "$component" == "frontend" ]]; then
+                echo "$GUGU_TRANSIT_EXT_REPO_GITEE_URL"
+            else
+                echo "$GUGU_TRANSIT_PLUGIN_REPO_GITEE_URL"
+            fi
+            return
+            ;;
+    esac
 
     if ! fn_load_first_party_sources; then
         return 1
@@ -2821,12 +2891,42 @@ fn_get_gugu_transit_repo_url() {
 }
 
 fn_menu_gugu_transit_route_mode() {
-    clear
-    fn_print_header "当前发布源"
-    echo -e "      第一方仓库现已统一跟随服务器发布源。"
-    echo -e "      当前来源: ${YELLOW}$(fn_get_gugu_transit_route_mode_label)${NC}"
-    echo -e "      如需切回 GitHub，只需要在服务器端调整 source-manifest.json。"
-    fn_press_any_key
+    while true; do
+        clear
+        fn_print_header "切换当前发布源"
+        echo -e "      当前来源: ${YELLOW}$(fn_get_gugu_transit_route_mode_label)${NC}"
+        echo -e "      [1] ${CYAN}跟随服务器${NC}"
+        echo -e "      [2] ${CYAN}固定为 GitHub${NC}"
+        echo -e "      [3] ${CYAN}固定为 Gitee${NC}"
+        echo -e "      [0] ${CYAN}返回上一级${NC}\n"
+
+        local choice
+        choice="$(fn_read_menu_prompt "0-3")"
+        case "$choice" in
+            1)
+                fn_set_gugu_transit_route_mode "$GUGU_TRANSIT_ROUTE_MODE_FOLLOW"
+                fn_print_success "已切换为：跟随服务器。"
+                sleep 1
+                ;;
+            2)
+                fn_set_gugu_transit_route_mode "$GUGU_TRANSIT_ROUTE_MODE_GITHUB"
+                fn_print_success "已切换为：固定使用 GitHub。"
+                sleep 1
+                ;;
+            3)
+                fn_set_gugu_transit_route_mode "$GUGU_TRANSIT_ROUTE_MODE_GITEE"
+                fn_print_success "已切换为：固定使用 Gitee。"
+                sleep 1
+                ;;
+            0)
+                return
+                ;;
+            *)
+                fn_print_error "输入无效，请按提示重试。"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 fn_get_gugu_transit_status() {
@@ -2952,7 +3052,7 @@ fn_menu_gugu_transit_manager() {
         if [ -d "$GUGU_TRANSIT_EXT_DIR" ] || [ -d "$GUGU_TRANSIT_PLUGIN_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_EXT_DIR" ] || [ -d "$LEGACY_GUGU_TRANSIT_PLUGIN_DIR" ] || [ -L "$GUGU_TRANSIT_EXT_TARGET" ] || [ -L "$GUGU_TRANSIT_PLUGIN_TARGET" ]; then
             echo -e "      [02] ${RED}卸载${NC}"
         fi
-        echo -e "      [03] ${CYAN}查看当前发布源${NC}"
+        echo -e "      [03] ${CYAN}切换当前发布源${NC}"
 
         echo -e "      [00] ${CYAN}返回上一级${NC}\n"
 

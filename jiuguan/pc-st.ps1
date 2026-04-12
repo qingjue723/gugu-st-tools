@@ -7,7 +7,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-$ScriptVersion = "v5.28"
+$ScriptVersion = "v5.30"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -51,6 +51,13 @@ $GcliDir = Join-Path $ScriptBaseDir "gcli2api"
 $script:GuguTransitExtRepoUrl = $null
 $script:GuguTransitPluginRepoUrl = $null
 $GuguTransitRouteModeKey = "GUGU_TRANSIT_ROUTE_MODE"
+$GuguTransitRouteModeFollow = "follow"
+$GuguTransitRouteModeGitHub = "github"
+$GuguTransitRouteModeGitee = "gitee"
+$GuguTransitExtRepoGitHubUrl = "https://github.com/qingjue723/gugu-transit-manager.git"
+$GuguTransitPluginRepoGitHubUrl = "https://github.com/qingjue723/gugu-transit-manager-plugin.git"
+$GuguTransitExtRepoGiteeUrl = "https://gitee.com/canaan723/gugu-transit-manager.git"
+$GuguTransitPluginRepoGiteeUrl = "https://gitee.com/canaan723/gugu-transit-manager-plugin.git"
 $GuguTransitExtTarget = Join-Path $ST_Dir "public/scripts/extensions/third-party/gugu-transit-manager"
 $GuguTransitPluginTarget = Join-Path $ST_Dir "plugins/gugu-transit-manager-plugin"
 $GuguTransitExtDir = $GuguTransitExtTarget
@@ -1543,7 +1550,7 @@ function Backup-ToCloud {
 
     $pushUrl = Get-AuthenticatedGitHubUrl -RepoUrl $gitConfig["REPO_URL"] -RepoToken $gitConfig["REPO_TOKEN"]
     if (-not $pushUrl) {
-        Write-Error "当前仅支持 GitHub HTTPS 仓库进行云端备份。"; Press-Any-Key; return
+        Write-Error "云端备份独立于发布源，当前仅支持 GitHub HTTPS 私有仓库。"; Press-Any-Key; return
     }
 
     if (-not (Assert-GitHubDirectConnectivity -OperationName "云端备份")) {
@@ -1678,7 +1685,7 @@ function Restore-FromCloud {
 
     $pullUrl = Get-AuthenticatedGitHubUrl -RepoUrl $gitConfig["REPO_URL"] -RepoToken $gitConfig["REPO_TOKEN"]
     if (-not $pullUrl) {
-        Write-Error "当前仅支持 GitHub HTTPS 仓库进行云端恢复。"; Press-Any-Key; return
+        Write-Error "云端恢复独立于发布源，当前仅支持 GitHub HTTPS 私有仓库。"; Press-Any-Key; return
     }
 
     if (-not (Assert-GitHubDirectConnectivity -OperationName "云端恢复")) {
@@ -2788,12 +2795,54 @@ function Write-GuguTransitInstallMarker {
 }
 
 function Resolve-GuguTransitRoute {
+    $localMode = Get-GuguTransitRouteMode
+    if ($localMode -eq $GuguTransitRouteModeGitHub -or $localMode -eq $GuguTransitRouteModeGitee) {
+        return $localMode
+    }
+
     try {
         Initialize-FirstPartySources
         return $script:SourceProvider
     } catch {
         return "unknown"
     }
+}
+
+function Get-GuguTransitRouteMode {
+    if (-not (Test-Path $LabConfigFile)) {
+        return $GuguTransitRouteModeFollow
+    }
+
+    $matchedLine = Select-String -Path $LabConfigFile -Pattern "^$GuguTransitRouteModeKey=""([^""]*)""$" | Select-Object -Last 1
+    if ($null -eq $matchedLine) {
+        return $GuguTransitRouteModeFollow
+    }
+
+    $routeMode = $matchedLine.Matches[0].Groups[1].Value
+    switch ($routeMode) {
+        $GuguTransitRouteModeGitHub { return $routeMode }
+        $GuguTransitRouteModeGitee { return $routeMode }
+        $GuguTransitRouteModeFollow { return $routeMode }
+        default { return $GuguTransitRouteModeFollow }
+    }
+}
+
+function Set-GuguTransitRouteMode {
+    param([string]$RouteMode)
+
+    if (-not (Test-Path $ConfigDir)) {
+        New-Item -Path $ConfigDir -ItemType Directory -Force | Out-Null
+    }
+    if (-not (Test-Path $LabConfigFile)) {
+        New-Item -Path $LabConfigFile -ItemType File -Force | Out-Null
+    }
+
+    $lines = @()
+    if (Test-Path $LabConfigFile) {
+        $lines = Get-Content -Path $LabConfigFile | Where-Object { $_ -notmatch "^$GuguTransitRouteModeKey=" }
+    }
+    $lines += "$GuguTransitRouteModeKey=""$RouteMode"""
+    Set-Content -Path $LabConfigFile -Value $lines -Encoding utf8
 }
 
 function Get-GuguTransitRouteLabel {
@@ -2806,6 +2855,10 @@ function Get-GuguTransitRouteLabel {
 }
 
 function Get-GuguTransitRouteModeLabel {
+    $routeMode = Get-GuguTransitRouteMode
+    if ($routeMode -eq $GuguTransitRouteModeGitHub) { return "本地固定：GitHub" }
+    if ($routeMode -eq $GuguTransitRouteModeGitee) { return "本地固定：Gitee" }
+
     $routeLabel = Get-GuguTransitRouteLabel -Route (Resolve-GuguTransitRoute)
     if ($routeLabel -eq "未知") { return "跟随服务器（当前不可用）" }
     return "跟随服务器（当前：$routeLabel）"
@@ -2817,19 +2870,55 @@ function Get-GuguTransitRepoUrl {
         [string]$Route
     )
 
+    if ($Route -eq $GuguTransitRouteModeGitHub) {
+        if ($Component -eq "frontend") { return $GuguTransitExtRepoGitHubUrl }
+        return $GuguTransitPluginRepoGitHubUrl
+    }
+    if ($Route -eq $GuguTransitRouteModeGitee) {
+        if ($Component -eq "frontend") { return $GuguTransitExtRepoGiteeUrl }
+        return $GuguTransitPluginRepoGiteeUrl
+    }
+
     Initialize-FirstPartySources
     if ($Component -eq "frontend") { return $script:GuguTransitExtRepoUrl }
     return $script:GuguTransitPluginRepoUrl
 }
 
 function Show-GuguTransitRouteMenu {
-    Clear-Host
-    Write-Header "当前发布源"
-    Write-Host "      第一方仓库现已统一跟随服务器发布源。"
-    Write-Host "      当前来源: " -NoNewline
-    Write-Host (Get-GuguTransitRouteModeLabel) -ForegroundColor Yellow
-    Write-Host "      如需切回 GitHub，只需要在服务器端调整 source-manifest.json。"
-    Press-Any-Key
+    while ($true) {
+        Clear-Host
+        Write-Header "切换当前发布源"
+        Write-Host "      当前来源: " -NoNewline
+        Write-Host (Get-GuguTransitRouteModeLabel) -ForegroundColor Yellow
+        Write-Host "      [1] " -NoNewline; Write-Host "跟随服务器" -ForegroundColor Cyan
+        Write-Host "      [2] " -NoNewline; Write-Host "固定为 GitHub" -ForegroundColor Cyan
+        Write-Host "      [3] " -NoNewline; Write-Host "固定为 Gitee" -ForegroundColor Cyan
+        Write-Host "      [0] " -NoNewline; Write-Host "返回上一级" -ForegroundColor Cyan
+
+        $choice = Read-MenuPrompt -Allowed "0-3"
+        switch ($choice) {
+            "1" {
+                Set-GuguTransitRouteMode -RouteMode $GuguTransitRouteModeFollow
+                Write-Success "已切换为：跟随服务器。"
+                Start-Sleep 1
+            }
+            "2" {
+                Set-GuguTransitRouteMode -RouteMode $GuguTransitRouteModeGitHub
+                Write-Success "已切换为：固定使用 GitHub。"
+                Start-Sleep 1
+            }
+            "3" {
+                Set-GuguTransitRouteMode -RouteMode $GuguTransitRouteModeGitee
+                Write-Success "已切换为：固定使用 Gitee。"
+                Start-Sleep 1
+            }
+            "0" { return }
+            default {
+                Write-Warning "输入无效，请按提示重试。"
+                Start-Sleep 1
+            }
+        }
+    }
 }
 
 function Get-GuguTransitStatus {
@@ -2851,7 +2940,6 @@ function Install-GuguTransitManager {
     $serverPluginsAutoUpdateEnabled = $false
 
     try {
-        Initialize-FirstPartySources
         $route = Resolve-GuguTransitRoute
         $frontendRepoUrl = Get-GuguTransitRepoUrl -Component "frontend" -Route $route
         $backendRepoUrl = Get-GuguTransitRepoUrl -Component "backend" -Route $route
@@ -2981,7 +3069,7 @@ function Show-GuguTransitManagerMenu {
         if (($status -ne "未安装") -or (Test-Path $LegacyGuguTransitExtDir) -or (Test-Path $LegacyGuguTransitPluginDir)) {
             Write-Host "      [02] " -NoNewline; Write-Host "卸载" -ForegroundColor Red
         }
-        Write-Host "      [03] " -NoNewline; Write-Host "查看当前发布源" -ForegroundColor Cyan
+        Write-Host "      [03] " -NoNewline; Write-Host "切换当前发布源" -ForegroundColor Cyan
         Write-Host "      [00] " -NoNewline; Write-Host "返回上一级" -ForegroundColor Cyan
 
         $allowedChoices = if (($status -eq "未安装") -and -not (Test-Path $LegacyGuguTransitExtDir) -and -not (Test-Path $LegacyGuguTransitPluginDir)) { "0/1/3" } else { "0-3" }

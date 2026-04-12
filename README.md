@@ -38,4 +38,4 @@
 ## 🔗 官方渠道
 
 - **作者博客**: [blog.qjyg.de](https://blog.qjyg.de)
-- **项目仓库**: [GitHub](https://github.com/canaan723/st-tools) | [Gitee](https://gitee.com/canaan723/st-tools)
+- **项目仓库**: [GitHub](https://github.com/qingjue723/gugu-st-tools) | [Gitee](https://gitee.com/canaan723/st-tools)
