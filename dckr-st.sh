@@ -12,7 +12,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-readonly SCRIPT_VERSION="v5.28"
+readonly SCRIPT_VERSION="v5.29"
 GUGU_MODE="prod"
 
 if [ "$GUGU_MODE" = "prod" ]; then
@@ -228,6 +228,9 @@ readonly BLUE='\033[0;34m'
 readonly CYAN='\033[1;36m'
 readonly BOLD='\033[1m'
 readonly NC='\033[0m'
+readonly BBR_MODULE_NAME='tcp_bbr'
+readonly BBR_MODULES_LOAD_FILE='/etc/modules-load.d/99-bbr.conf'
+readonly BBR_SYSCTL_FILE='/etc/sysctl.d/99-bbr.conf'
 
 IS_DEBIAN_LIKE=false
 DETECTED_OS="未知"
@@ -1963,32 +1966,63 @@ fn_system_upgrade_optimize() {
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
     
     log_action "正在优化内核参数 (BBR)..."
-    # 确保 /etc/sysctl.conf 存在，防止 sed 报错
-    if [ ! -f /etc/sysctl.conf ]; then
-        log_info "/etc/sysctl.conf 不存在，正在创建..."
-        touch /etc/sysctl.conf
-    fi
-
-    # 清理旧配置
-    sed -i -e '/net.core.default_qdisc=fq/d' \
-           -e '/net.ipv4.tcp_congestion_control=bbr/d' \
-           -e '/vm.swappiness=10/d' /etc/sysctl.conf
+    fn_configure_bbr || return 1
     
-    # 确保文件末尾有且只有一个空行，然后追加配置
-    if [ -s /etc/sysctl.conf ]; then
-        sed -i '${/^$/d;}' /etc/sysctl.conf
+    create_dynamic_swap
+    log_success "系统升级与内核优化完成。"
+}
+
+fn_prepare_bbr_module() {
+    local module_path=""
+    local available_cc=""
+
+    module_path="$(find "/lib/modules/$(uname -r)" -type f -name "${BBR_MODULE_NAME}.ko*" 2>/dev/null | head -n 1)"
+    if [ -n "$module_path" ]; then
+        printf '%s\n' "$BBR_MODULE_NAME" > "$BBR_MODULES_LOAD_FILE"
+        if ! modprobe "$BBR_MODULE_NAME"; then
+            log_error "加载 ${BBR_MODULE_NAME} 模块失败，BBR 未启用。" || return 1
+        fi
+    else
+        rm -f "$BBR_MODULES_LOAD_FILE"
     fi
 
-    cat <<EOF >> /etc/sysctl.conf
+    available_cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+    if ! printf '%s\n' "$available_cc" | grep -qw 'bbr'; then
+        log_error "内核未提供 bbr 拥塞控制算法，当前可用值：${available_cc:-<empty>}。" || return 1
+    fi
+}
 
+fn_write_bbr_sysctl_config() {
+    cat <<EOF > "$BBR_SYSCTL_FILE"
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 vm.swappiness=10
 EOF
-    sysctl -p > /dev/null 2>&1 || true
-    
-    create_dynamic_swap
-    log_success "系统升级与内核优化完成。"
+}
+
+fn_verify_bbr_status() {
+    local active_cc=""
+    local active_qdisc=""
+
+    active_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+    active_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+
+    if [ "$active_cc" != 'bbr' ] || [ "$active_qdisc" != 'fq' ]; then
+        log_error "BBR 校验失败：tcp_congestion_control=${active_cc:-<empty>}，default_qdisc=${active_qdisc:-<empty>}。" || return 1
+    fi
+
+    log_success "BBR 已启用：tcp_congestion_control=$active_cc，default_qdisc=$active_qdisc"
+}
+
+fn_configure_bbr() {
+    fn_prepare_bbr_module || return 1
+    fn_write_bbr_sysctl_config || return 1
+
+    if ! sysctl -p "$BBR_SYSCTL_FILE"; then
+        log_error "应用 BBR sysctl 配置失败：$BBR_SYSCTL_FILE" || return 1
+    fi
+
+    fn_verify_bbr_status || return 1
 }
 
 fn_reboot_system() {
