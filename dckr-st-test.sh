@@ -75,6 +75,7 @@ readonly AIS2API_NEW_IMAGE_REPO="ghcr.io/ibuhub/aistudio-to-api"
 readonly AIS2API_NEW_IMAGE="ghcr.io/ibuhub/aistudio-to-api:latest"
 readonly ONEPANEL_TMP_DIR="/opt/1panel/backup/tmp"
 readonly ONEPANEL_TMP_RETENTION_DAYS=7
+readonly TEMPLATES_BASE_URL="https://gugu.qjyg.de/templates"
 SYSTEM_CLEANUP_1PANEL_STATUS=""
 SYSTEM_CLEANUP_1PANEL_DELETED_COUNT=0
 ST_TRANSIT_FRONTEND_REPO_URL=""
@@ -2980,76 +2981,109 @@ EOF
     done
 }
 
-install_gcli2api() {
-    # 初始化变量供全局检查函数使用
-    local DOCKER_VER="-" DOCKER_STATUS="-"
-    local COMPOSE_VER="-" COMPOSE_STATUS="-"
-    local DOCKER_COMPOSE_CMD=""
-    local CONTAINER_NAME="gcli2api"
-    local IMAGE_NAME="ghcr.io/su-kaka/gcli2api:latest"
-    
+# --- [通用 Docker 应用安装] ---
+fn_download_template() {
+    local app_name="$1"
+    local file_name="$2"
+    local dest_path="$3"
+    local url="${TEMPLATES_BASE_URL}/${app_name}/${file_name}"
+
+    if ! curl -fsSL "$url" -o "$dest_path"; then
+        log_error "模板下载失败：${url}" || return 1
+    fi
+}
+
+fn_install_docker_app() {
+    local app_name="$1"
+    local display_name="$2"
+    local image_name="$3"
+    local default_port="$4"
+    local key="$5"
+    local extra_dirs="$6"
+
+    local CONTAINER_NAME="$app_name"
+
     tput reset
-    echo -e "${CYAN}gcli2api Docker 自动化安装流程${NC}"
-    
+    echo -e "${CYAN}${display_name} Docker 自动化安装流程${NC}"
+
     fn_check_base_deps
     fn_check_dependencies
-    
+
     fn_confirm_remove_existing_container "$CONTAINER_NAME" || return 1
 
+    # 安装路径
     local default_parent_path="${USER_HOME}"
-    read -rp "安装路径: gcli2api 将被安装在 <上级目录>/gcli2api 中。请输入上级目录 [直接回车=默认: $USER_HOME]:" custom_parent_path < /dev/tty
+    read -rp "安装路径: ${display_name} 将被安装在 <上级目录>/${app_name} 中。请输入上级目录 [直接回车=默认: $USER_HOME]:" custom_parent_path < /dev/tty
     local parent_path="${custom_parent_path:-$default_parent_path}"
-    local INSTALL_DIR="${parent_path}/gcli2api"
+    local INSTALL_DIR="${parent_path}/${app_name}"
 
-    # 路径安全检查：禁止安装到系统关键目录
     if [[ "$INSTALL_DIR" =~ ^/(bin|boot|dev|etc|lib|lib64|proc|sbin|sys|usr)(/|$) ]]; then
         log_error "安全限制：不允许安装到系统关键目录 ($INSTALL_DIR)。请选择其他路径。" || return 1
     fi
 
-    fn_prompt_port_in_range GCLI_PORT "请输入访问端口 (1-65535) [默认 7861]: " "7861" 1 65535
+    # 端口
+    local APP_PORT=""
+    fn_prompt_port_in_range APP_PORT "请输入访问端口 (1-65535) [默认 ${default_port}]: " "$default_port" 1 65535
 
+    # 目录
+    if [ -n "$extra_dirs" ]; then
+        log_action "正在创建目录结构..."
+        IFS=',' read -ra dirs <<< "$extra_dirs"
+        for d in "${dirs[@]}"; do
+            mkdir -p "$INSTALL_DIR/$d"
+        done
+    fi
+
+    # 下载模板
+    log_action "正在下载配置模板..."
+    fn_download_template "$app_name" "docker-compose.yml" "$INSTALL_DIR/docker-compose.yml"
+    fn_download_template "$app_name" "app.env" "$INSTALL_DIR/app.env" 2>/dev/null || true
+
+    # 变量替换 compose
+    sed -i "s|{{CONTAINER_NAME}}|${CONTAINER_NAME}|g" "$INSTALL_DIR/docker-compose.yml"
+    sed -i "s|{{IMAGE_NAME}}|${image_name}|g" "$INSTALL_DIR/docker-compose.yml"
+    sed -i "s|{{PORT}}|${APP_PORT}|g" "$INSTALL_DIR/docker-compose.yml"
+    sed -i "s|{{PASSWORD}}|${key}|g" "$INSTALL_DIR/docker-compose.yml"
+
+    # 变量替换 env
+    if [ -f "$INSTALL_DIR/app.env" ]; then
+        sed -i "s|{{API_KEYS}}|${key}|g" "$INSTALL_DIR/app.env"
+    fi
+
+    # 启动
+    local DOCKER_COMPOSE_CMD
+    DOCKER_COMPOSE_CMD=$(fn_detect_compose_cmd || true)
+    log_action "正在启动服务..."
+    cd "$INSTALL_DIR" && $DOCKER_COMPOSE_CMD up -d
+
+    fn_verify_container_health "$CONTAINER_NAME"
+
+    local SERVER_IP=$(fn_get_public_ip)
+    echo -e "\n${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "║              ${BOLD}${display_name} 部署成功！${NC}                       ║"
+    echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "\n  ${CYAN}访问地址:${NC} ${GREEN}http://${SERVER_IP}:${APP_PORT}${NC}"
+    if [ -n "$key" ]; then
+        echo -e "  ${CYAN}密钥/密码:${NC} ${YELLOW}${key}${NC}"
+    fi
+    echo -e "  ${CYAN}项目路径:${NC} $INSTALL_DIR"
+
+    # 输出给调用方使用
+    INSTALL_RESULT_IP="$SERVER_IP"
+    INSTALL_RESULT_PORT="$APP_PORT"
+    INSTALL_RESULT_DIR="$INSTALL_DIR"
+}
+# ------------------------------------
+
+install_gcli2api() {
     local random_pwd=$(fn_generate_password 34)
     read -rp "请输入管理密码 [直接回车=随机生成]: " GCLI_PWD < /dev/tty
     GCLI_PWD=${GCLI_PWD:-$random_pwd}
 
-    log_action "正在创建目录结构..."
-    mkdir -p "$INSTALL_DIR/data/creds"
-    
-    log_action "正在生成 docker-compose.yml..."
-    cat <<EOF > "$INSTALL_DIR/docker-compose.yml"
-# ✦ 咕咕助手 · 作者：清绝 | 博客：https://blog.qjyg.de
-services:
-  gcli2api:
-    image: ${IMAGE_NAME}
-    container_name: ${CONTAINER_NAME}
-    restart: unless-stopped
-    ports:
-      - "${GCLI_PORT}:7861"
-    environment:
-      - PASSWORD=${GCLI_PWD}
-      - PORT=7861
-    volumes:
-      - ./data/creds:/app/creds
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import sys, urllib.request, os; port = os.environ.get('PORT', '7861'); req = urllib.request.Request(f'http://localhost:{port}/v1/models', headers={'Authorization': 'Bearer ' + os.environ.get('PASSWORD', 'pwd')}); sys.exit(0 if urllib.request.urlopen(req, timeout=5).getcode() == 200 else 1)\""]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-EOF
-
-    log_action "正在启动服务..."
-    cd "$INSTALL_DIR" && $DOCKER_COMPOSE_CMD up -d
-    
-    fn_verify_container_health "$CONTAINER_NAME"
-    
-    local SERVER_IP=$(fn_get_public_ip)
-    echo -e "\n${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "║                   ${BOLD}gcli2api 部署成功！${NC}                      ║"
-    echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
-    echo -e "\n  ${CYAN}访问地址:${NC} ${GREEN}http://${SERVER_IP}:${GCLI_PORT}${NC}"
-    echo -e "  ${CYAN}管理密码:${NC} ${YELLOW}${GCLI_PWD}${NC}"
-    echo -e "  ${CYAN}项目路径:${NC} $INSTALL_DIR"
+    fn_install_docker_app \
+        "gcli2api" "gcli2api" \
+        "ghcr.io/su-kaka/gcli2api:latest" \
+        "7861" "$GCLI_PWD" "data/creds"
 }
 
 fn_write_ais_official_env() {
@@ -3247,154 +3281,32 @@ fn_migrate_ais2api_to_ibuhub() {
 }
 
 install_ais2api() {
-    # 初始化变量供全局检查函数使用
-    local DOCKER_VER="-" DOCKER_STATUS="-"
-    local COMPOSE_VER="-" COMPOSE_STATUS="-"
-    local DOCKER_COMPOSE_CMD=""
-    local CONTAINER_NAME="ais2api"
-    local IMAGE_NAME="$AIS2API_NEW_IMAGE"
-    
-    tput reset
-    echo -e "${CYAN}ais2api Docker 自动化安装流程${NC}"
-    
-    fn_check_base_deps
-    fn_check_dependencies
-    
-    fn_confirm_remove_existing_container "$CONTAINER_NAME" || return 1
-
-    local default_parent_path="${USER_HOME}"
-    read -rp "安装路径: ais2api 将被安装在 <上级目录>/ais2api 中。请输入上级目录 [直接回车=默认: $USER_HOME]:" custom_parent_path < /dev/tty
-    local parent_path="${custom_parent_path:-$default_parent_path}"
-    local INSTALL_DIR="${parent_path}/ais2api"
-
-    # 路径安全检查：禁止安装到系统关键目录
-    if [[ "$INSTALL_DIR" =~ ^/(bin|boot|dev|etc|lib|lib64|proc|sbin|sys|usr)(/|$) ]]; then
-        log_error "安全限制：不允许安装到系统关键目录 ($INSTALL_DIR)。请选择其他路径。" || return 1
-    fi
-
-    fn_prompt_port_in_range AIS_PORT "请输入访问端口 (1-65535) [默认 8889]: " "8889" 1 65535
-
     local random_key=$(fn_generate_password 34)
     read -rp "请输入 API Key [直接回车=随机生成]: " AIS_KEY < /dev/tty
     AIS_KEY=${AIS_KEY:-$random_key}
-
-    log_action "正在创建目录结构..."
-    mkdir -p "$INSTALL_DIR/auth"
     log_info "新镜像支持在 Web 面板中进行认证配置，无需预先放入认证文件。"
-    
-    log_action "正在生成 app.env..."
-    fn_write_ais_official_env "$INSTALL_DIR/app.env" "$AIS_KEY"
 
-    log_action "正在生成 docker-compose.yml..."
-    cat <<EOF > "$INSTALL_DIR/docker-compose.yml"
-# ✦ 咕咕助手 · 作者：清绝 | 博客：https://blog.qjyg.de
-services:
-  ais2api:
-    container_name: ${CONTAINER_NAME}
-    image: ${IMAGE_NAME}
-    ports:
-      - "${AIS_PORT}:7860"
-    env_file:
-      - app.env
-    volumes:
-      - ./auth:/app/configs/auth
-      - ./data:/app/data
-    restart: unless-stopped
-EOF
-
-    log_action "正在启动服务..."
-    cd "$INSTALL_DIR" && $DOCKER_COMPOSE_CMD up -d
-    
-    fn_verify_container_health "$CONTAINER_NAME"
-    
-    local SERVER_IP=$(fn_get_public_ip)
-    echo -e "\n${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "║                   ${BOLD}ais2api 部署成功！${NC}                       ║"
-    echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
-    echo -e "\n  ${CYAN}访问地址:${NC} ${GREEN}http://${SERVER_IP}:${AIS_PORT}${NC}"
-    echo -e "  ${CYAN}API Key:${NC} ${YELLOW}${AIS_KEY}${NC}"
-    echo -e "  ${CYAN}项目路径:${NC} $INSTALL_DIR"
+    fn_install_docker_app \
+        "ais2api" "ais2api" \
+        "$AIS2API_NEW_IMAGE" \
+        "8889" "$AIS_KEY" "auth"
 }
 
 install_warp() {
-    local DOCKER_VER="-" DOCKER_STATUS="-"
-    local COMPOSE_VER="-" COMPOSE_STATUS="-"
-    local DOCKER_COMPOSE_CMD=""
-    local CONTAINER_NAME="warp"
-    local IMAGE_NAME="caomingjun/warp"
-
-    tput reset
-    echo -e "${CYAN}Warp-Docker 自动化安装流程${NC}"
-
-    fn_check_base_deps
-    fn_check_dependencies
-
-    fn_confirm_remove_existing_container "$CONTAINER_NAME" || return 1
-
-    local default_parent_path="${USER_HOME}"
-    read -rp "安装路径: Warp 将被安装在 <上级目录>/warp 中。请输入上级目录 [直接回车=默认: $USER_HOME]:" custom_parent_path < /dev/tty
-    local parent_path="${custom_parent_path:-$default_parent_path}"
-    local INSTALL_DIR="${parent_path}/warp"
-
-    # 路径安全检查：禁止安装到系统关键目录
-    if [[ "$INSTALL_DIR" =~ ^/(bin|boot|dev|etc|lib|lib64|proc|sbin|sys|usr)(/|$) ]]; then
-        log_error "安全限制：不允许安装到系统关键目录 ($INSTALL_DIR)。请选择其他路径。" || return 1
-    fi
-
-    fn_prompt_port_in_range WARP_PORT "请输入 Warp 代理映射到宿主机的端口 (1-65535) [默认 1080]: " "1080" 1 65535
-
-    log_action "正在创建目录结构..."
-    mkdir -p "$INSTALL_DIR/data"
-
     log_action "正在创建 Docker 网络 'warp'..."
     docker network create warp >/dev/null 2>&1 || true
 
-    log_action "正在生成 docker-compose.yml..."
-    cat <<EOF > "$INSTALL_DIR/docker-compose.yml"
-# ✦ 咕咕助手 · 作者：清绝 | 博客：https://blog.qjyg.de
-networks:
-  warp:
-    external: true
-services:
-  warp:
-    image: ${IMAGE_NAME}
-    container_name: ${CONTAINER_NAME}
-    restart: always
-    environment:
-      - WARP_SLEEP=2
-      - WARP_PROXY=0.0.0.0:1080
-    cap_add:
-      - NET_ADMIN
-      - SYS_ADMIN
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=0
-      - net.ipv4.conf.all.src_valid_mark=1
-    volumes:
-      - ./data:/var/lib/cloudflare-warp
-    ports:
-      - "127.0.0.1:${WARP_PORT}:1080"
-    networks:
-      - warp
-EOF
+    fn_install_docker_app \
+        "warp" "Warp" \
+        "caomingjun/warp" \
+        "1080" "" "data"
 
-    log_action "正在启动服务..."
-    cd "$INSTALL_DIR" && $DOCKER_COMPOSE_CMD up -d
-
-    fn_verify_container_health "$CONTAINER_NAME"
-
-    echo -e "\n${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "║                   ${BOLD}Warp 部署成功！${NC}                          ║"
-    echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo -e "\n  ${CYAN}代理访问地址 (容器间):${NC}"
     echo -e "    HTTP:   ${GREEN}http://warp:1080${NC}"
     echo -e "    SOCKS5: ${GREEN}socks5://warp:1080${NC}"
     echo -e "\n  ${CYAN}代理访问地址 (宿主机):${NC}"
-    echo -e "    HTTP:   ${GREEN}http://127.0.0.1:${WARP_PORT}${NC}"
-    echo -e "    SOCKS5: ${GREEN}socks5://127.0.0.1:${WARP_PORT}${NC}"
-    echo -e "\n  ${CYAN}代理访问地址 (Docker网桥):${NC}"
-    echo -e "    HTTP:   ${GREEN}http://172.17.0.1:${WARP_PORT}${NC}"
-    echo -e "    SOCKS5: ${GREEN}socks5://172.17.0.1:${WARP_PORT}${NC}"
-    echo -e "\n  ${CYAN}项目路径:${NC} $INSTALL_DIR"
+    echo -e "    HTTP:   ${GREEN}http://127.0.0.1:${INSTALL_RESULT_PORT}${NC}"
+    echo -e "    SOCKS5: ${GREEN}socks5://127.0.0.1:${INSTALL_RESULT_PORT}${NC}"
 }
 
 fn_test_scripts_menu() {
