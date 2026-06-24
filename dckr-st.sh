@@ -2856,27 +2856,9 @@ install_sillytavern() {
     cd "$INSTALL_DIR"
     fn_print_info "工作目录已切换至: $(pwd)"
 
-    cat <<EOF > "$COMPOSE_FILE"
-services:
-  sillytavern:
-    container_name: ${CONTAINER_NAME}
-    hostname: ${CONTAINER_NAME}
-    image: ${IMAGE_NAME}
-    security_opt:
-      - apparmor:unconfined
-    environment:
-      - NODE_ENV=production
-      - FORCE_COLOR=1
-      - NODE_OPTIONS=--max-old-space-size=${NODE_MAX_MEM}
-    ports:
-      - "${ST_PORT}:8000"
-    volumes:
-      - "./config:/home/node/app/config:z"
-      - "./data:/home/node/app/data:z"
-      - "./plugins:/home/node/app/plugins:z"
-      - "./third-party:/home/node/app/public/scripts/extensions/third-party:z"
-    restart: unless-stopped
-EOF
+    fn_download_template "sillytavern" "docker-compose.yml" "$COMPOSE_FILE"
+    sed -i "s|{{ST_PORT}}|${ST_PORT}|g" "$COMPOSE_FILE"
+    sed -i "s|{{NODE_MAX_MEM}}|${NODE_MAX_MEM}|g" "$COMPOSE_FILE"
     log_success "docker-compose.yml 文件创建成功！"
 
     fn_print_step "[ 4/5 ] 初始化与配置"
