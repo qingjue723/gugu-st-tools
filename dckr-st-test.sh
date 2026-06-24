@@ -2998,8 +2998,9 @@ fn_install_docker_app() {
     local display_name="$2"
     local image_name="$3"
     local default_port="$4"
-    local key="$5"
-    local extra_dirs="$6"
+    local extra_dirs="$5"
+    local key_prompt="$6"
+    local key_len="$7"
 
     local CONTAINER_NAME="$app_name"
 
@@ -3025,6 +3026,14 @@ fn_install_docker_app() {
     local APP_PORT=""
     fn_prompt_port_in_range APP_PORT "请输入访问端口 (1-65535) [默认 ${default_port}]: " "$default_port" 1 65535
 
+    # 密钥/密码（可选）
+    local key=""
+    if [ -n "$key_prompt" ]; then
+        local random_val=$(fn_generate_password "${key_len:-34}")
+        read -rp "请输入 ${key_prompt} [直接回车=随机生成]: " key < /dev/tty
+        key=${key:-$random_val}
+    fi
+
     # 目录
     if [ -n "$extra_dirs" ]; then
         log_action "正在创建目录结构..."
@@ -3043,10 +3052,12 @@ fn_install_docker_app() {
     sed -i "s|{{CONTAINER_NAME}}|${CONTAINER_NAME}|g" "$INSTALL_DIR/docker-compose.yml"
     sed -i "s|{{IMAGE_NAME}}|${image_name}|g" "$INSTALL_DIR/docker-compose.yml"
     sed -i "s|{{PORT}}|${APP_PORT}|g" "$INSTALL_DIR/docker-compose.yml"
-    sed -i "s|{{PASSWORD}}|${key}|g" "$INSTALL_DIR/docker-compose.yml"
+    if [ -n "$key" ]; then
+        sed -i "s|{{PASSWORD}}|${key}|g" "$INSTALL_DIR/docker-compose.yml"
+    fi
 
     # 变量替换 env
-    if [ -f "$INSTALL_DIR/app.env" ]; then
+    if [ -f "$INSTALL_DIR/app.env" ] && [ -n "$key" ]; then
         sed -i "s|{{API_KEYS}}|${key}|g" "$INSTALL_DIR/app.env"
     fi
 
@@ -3076,14 +3087,11 @@ fn_install_docker_app() {
 # ------------------------------------
 
 install_gcli2api() {
-    local random_pwd=$(fn_generate_password 34)
-    read -rp "请输入管理密码 [直接回车=随机生成]: " GCLI_PWD < /dev/tty
-    GCLI_PWD=${GCLI_PWD:-$random_pwd}
-
     fn_install_docker_app \
         "gcli2api" "gcli2api" \
         "ghcr.io/su-kaka/gcli2api:latest" \
-        "7861" "$GCLI_PWD" "data/creds"
+        "7861" "data/creds" \
+        "管理密码" "34"
 }
 
 fn_write_ais_official_env() {
@@ -3281,15 +3289,11 @@ fn_migrate_ais2api_to_ibuhub() {
 }
 
 install_ais2api() {
-    local random_key=$(fn_generate_password 34)
-    read -rp "请输入 API Key [直接回车=随机生成]: " AIS_KEY < /dev/tty
-    AIS_KEY=${AIS_KEY:-$random_key}
-    log_info "新镜像支持在 Web 面板中进行认证配置，无需预先放入认证文件。"
-
     fn_install_docker_app \
         "ais2api" "ais2api" \
         "$AIS2API_NEW_IMAGE" \
-        "8889" "$AIS_KEY" "auth"
+        "8889" "auth" \
+        "API Key" "34"
 }
 
 install_warp() {
@@ -3299,7 +3303,7 @@ install_warp() {
     fn_install_docker_app \
         "warp" "Warp" \
         "caomingjun/warp" \
-        "1080" "" "data"
+        "1080" "data"
 
     echo -e "\n  ${CYAN}代理访问地址 (容器间):${NC}"
     echo -e "    HTTP:   ${GREEN}http://warp:1080${NC}"
