@@ -12,7 +12,7 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
-readonly SCRIPT_VERSION="v5.25test"
+readonly SCRIPT_VERSION="v5.26test"
 GUGU_MODE="test"
 
 if [ "$GUGU_MODE" = "prod" ]; then
@@ -3058,64 +3058,101 @@ fn_write_ais_official_env() {
 
     cat <<EOF > "$env_file"
 # ===================================
-# Server Configuration
+# 服务器配置
 # ===================================
+# API 服务端口
 PORT=7860
+# 服务监听地址（0.0.0.0 允许外部访问）
 HOST=0.0.0.0
-WS_PORT=9998
 
 # ===================================
-# Authentication Configuration
+# 认证配置
 # ===================================
+# API 密钥（逗号分隔多个）
 API_KEYS=${api_keys}
 
 # ===================================
-# Security Configuration
+# 安全配置
 # ===================================
+# 是否启用安全 Cookie（使用 HTTPS 时设为 true）
 SECURE_COOKIES=false
+# 时间窗口内允许的最大失败登录次数（0 禁用）
 RATE_LIMIT_MAX_ATTEMPTS=5
+# 速率限制时间窗口（分钟）
 RATE_LIMIT_WINDOW_MINUTES=15
+# 启动时使用的初始认证索引
 INITIAL_AUTH_INDEX=0
 
 # ===================================
-# UI Configuration
+# 界面配置
 # ===================================
+# 自定义网站图标 URL（留空使用默认）
 ICON_URL=
+# 是否检查版本更新
 CHECK_UPDATE=true
 
 # ===================================
-# Browser Configuration
+# 日志配置
 # ===================================
+# 日志等级（INFO / DEBUG）
+LOG_LEVEL=INFO
+# 时区（留空使用系统时区）
+TZ=Asia/Shanghai
+
+# ===================================
+# 浏览器配置
+# ===================================
+# Camoufox 浏览器可执行文件路径（留空自动检测）
 CAMOUFOX_EXECUTABLE_PATH=
-TARGET_DOMAIN=
+# 最大同时登录账号数（每个约 700MB 内存，0 为无限制）
+MAX_CONTEXTS=1
 
 # ===================================
-# Request Handling Configuration
+# 请求处理配置
 # ===================================
-STREAMING_MODE=real
+# 流式模式：real=真流式（延迟低）/ fake=假流式（兼容性好）
+STREAMING_MODE=fake
+# 请求失败最大重试次数
 MAX_RETRIES=3
+# 重试间隔（毫秒）
 RETRY_DELAY=2000
-FORCE_THINKING=false
+# 真流式相邻数据块超时时间（毫秒，最大 300000）
+STREAM_TIMEOUT_MS=60000
+# 假流式/非流式缓冲响应超时时间（毫秒，最大 300000）
+FAKE_STREAM_TIMEOUT_MS=300000
+# 强制所有请求启用思考模式
+FORCE_THINKING=true
+# 强制所有请求启用网络搜索
 FORCE_WEB_SEARCH=false
+# 强制所有请求启用代码执行
+FORCE_CODE_EXECUTION=false
+# 强制所有请求启用 URL 上下文
 FORCE_URL_CONTEXT=false
+# 是否自动更新认证凭据（每 24 小时 + 登录/切换时刷新）
+ENABLE_AUTH_UPDATE=true
+# 是否启用请求统计（写入 usage-stats.jsonl）
+ENABLE_USAGE_STATS=true
 
 # ===================================
-# Account Switching Configuration
+# 账号切换配置
 # ===================================
-SWITCH_ON_USES=40
+# 每 N 个请求后自动切换账号（0 禁用）
+SWITCH_ON_USES=10
+# 连续失败 N 次后切换账号（0 禁用）
 FAILURE_THRESHOLD=3
+# 触发立即切换的 HTTP 状态码（逗号分隔）
 IMMEDIATE_SWITCH_STATUS_CODES=429,503
+# Gemini 安全过滤等级（OFF=关闭）
+SAFETY_SETTINGS_THRESHOLD=OFF
 
 # ===================================
-# Timezone Configuration
+# 代理配置
 # ===================================
-TZ=
-
-# ===================================
-# Proxy Configuration
-# ===================================
+# HTTP 代理地址（访问 Google 服务用）
 HTTP_PROXY=
+# HTTPS 代理地址
 HTTPS_PROXY=
+# 不走代理的地址列表（逗号分隔）
 NO_PROXY=
 EOF
 }
@@ -3182,6 +3219,10 @@ fn_migrate_ais2api_to_ibuhub() {
         fi
     fi
 
+    if ! grep -q "/app/data" "$compose_file"; then
+        sed -i -E '0,/(\.\/auth:\/app\/configs\/auth)/s|(\.\/auth:\/app\/configs\/auth)|\1\n      - ./data:/app/data|' "$compose_file"
+    fi
+
     log_action "正在拉取新镜像并重建服务..."
     if ! (cd "$project_dir" && $compose_cmd pull && $compose_cmd up -d --force-recreate); then
         log_error "迁移失败：重建服务未成功，请检查日志。" || return 1
@@ -3246,6 +3287,7 @@ install_ais2api() {
 
     log_action "正在生成 docker-compose.yml..."
     cat <<EOF > "$INSTALL_DIR/docker-compose.yml"
+# ✦ 咕咕助手 · 作者：清绝 | 博客：https://blog.qjyg.de
 services:
   ais2api:
     container_name: ${CONTAINER_NAME}
@@ -3256,6 +3298,7 @@ services:
       - app.env
     volumes:
       - ./auth:/app/configs/auth
+      - ./data:/app/data
     restart: unless-stopped
 EOF
 
