@@ -234,12 +234,7 @@ export default {
       });
     }
 
-    // 非 CLI 请求重定向到博客
-    if (!isCliRequest(request.headers.get('User-Agent'))) {
-      return Response.redirect('https://blog.qjyg.de', 302);
-    }
-
-    // /templates/{app}/{file} — 模板文件代理
+    // /templates/{app}/{file} — 模板文件代理（CLI 检查前，允许脚本 curl 访问）
     if (path.startsWith('/templates/')) {
       const parts = path.replace('/templates/', '');
       if (!parts || parts.split('/').length !== 2) {
@@ -264,6 +259,11 @@ export default {
         statusText: payload.statusText,
         headers
       });
+    }
+
+    // 非 CLI 请求重定向到博客
+    if (!isCliRequest(request.headers.get('User-Agent'))) {
+      return Response.redirect('https://blog.qjyg.de', 302);
     }
 
     // 脚本路由

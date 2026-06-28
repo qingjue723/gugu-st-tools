@@ -7,6 +7,11 @@
 # 未经作者授权，严禁将本脚本或其修改版本用于任何形式的商业盈利行为（包括但不限于倒卖、付费部署服务等）。
 # 任何违反本协议的行为都将受到法律追究。
 
+param(
+    [string]$GuiCommand = "",
+    [string]$GuiPayloadJson = "{}"
+)
+
 $ScriptVersion = "v5.30"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -3861,6 +3866,297 @@ del %0
     }
 }
 
+# --- GUI 非交互命令入口 ---
+
+function ConvertTo-GuiSafeText {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return "" }
+    $text = [string]$Value
+    $text = $text -replace '(?i)(REPO_TOKEN\s*=\s*["'']?)[^"''\s]+', '$1***'
+    $text = $text -replace '(?i)(Authorization:\s*Bearer\s+)[^\s]+', '$1***'
+    $text = $text -replace '(https://[^/:@\s]+:)[^@\s]+(@)', '$1***$2'
+    return $text
+}
+
+function ConvertTo-GuiPowerShellLiteral {
+    param([AllowNull()][string]$Value)
+    if ($null -eq $Value) { return "''" }
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function New-GuiResult {
+    param(
+        [bool]$Ok,
+        [string]$Code,
+        [string]$Message,
+        [AllowNull()][object]$Data = $null,
+        [string[]]$Logs = @()
+    )
+    return [PSCustomObject]@{
+        ok      = $Ok
+        code    = $Code
+        message = $Message
+        data    = $Data
+        logs    = @($Logs | ForEach-Object { ConvertTo-GuiSafeText $_ })
+    }
+}
+
+function Write-GuiJsonResult {
+    param([object]$Result)
+    $json = $Result | ConvertTo-Json -Depth 10 -Compress
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    [Console]::Out.WriteLine($json)
+}
+
+function Get-GuiPayload {
+    if ([string]::IsNullOrWhiteSpace($GuiPayloadJson)) {
+        return [PSCustomObject]@{}
+    }
+    try {
+        return $GuiPayloadJson | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "GuiPayloadJson 不是合法 JSON：$($_.Exception.Message)"
+    }
+}
+
+function Get-GuiStartBatPath {
+    $candidates = @(
+        (Join-Path $ST_Dir "start.bat"),
+        (Join-Path $ST_Dir "Start.bat")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
+function Test-GuiPortListening {
+    param([AllowNull()][string]$Port)
+    if ([string]::IsNullOrWhiteSpace($Port) -or $Port -notmatch '^\d+$') { return $false }
+    try {
+        $connection = Get-NetTCPConnection -LocalPort ([int]$Port) -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        return ($null -ne $connection)
+    } catch {
+        return $false
+    }
+}
+
+function Get-GuiLastBackupInfo {
+    if (-not (Test-Path $Backup_Root_Dir)) { return $null }
+    $backup = Get-ChildItem -Path $Backup_Root_Dir -Filter "*.zip" -ErrorAction SilentlyContinue | Sort-Object CreationTime -Descending | Select-Object -First 1
+    if ($null -eq $backup) { return $null }
+    return [PSCustomObject]@{
+        name      = $backup.Name
+        path      = $backup.FullName
+        sizeBytes = $backup.Length
+        createdAt = $backup.CreationTime.ToString("o")
+    }
+}
+
+function Get-GuiAssistantStatus {
+    $port = if (Test-Path (Join-Path $ST_Dir "config.yaml")) { Get-STConfigValue "port" } else { "" }
+    if ([string]::IsNullOrWhiteSpace($port)) { $port = "8000" }
+    $backupCount = if (Test-Path $Backup_Root_Dir) { @(Get-ChildItem -Path $Backup_Root_Dir -Filter "*.zip" -ErrorAction SilentlyContinue).Count } else { 0 }
+
+    return [PSCustomObject]@{
+        scriptVersion = $ScriptVersion
+        baseDir = $ScriptBaseDir
+        configDir = $ConfigDir
+        tavernDir = $ST_Dir
+        backupDir = $Backup_Root_Dir
+        dependencies = [PSCustomObject]@{
+            git = [bool](Get-Command "git" -ErrorAction SilentlyContinue)
+            node = [bool](Get-Command "node" -ErrorAction SilentlyContinue)
+            npm = [bool](Get-Command "npm" -ErrorAction SilentlyContinue)
+            robocopy = [bool](Get-Command "robocopy" -ErrorAction SilentlyContinue)
+        }
+        tavern = [PSCustomObject]@{
+            installed = [bool](Test-Path $ST_Dir)
+            startBat = Get-GuiStartBatPath
+            configYaml = Join-Path $ST_Dir "config.yaml"
+            port = $port
+            running = Test-GuiPortListening $port
+        }
+        backups = [PSCustomObject]@{
+            count = $backupCount
+            limit = $Backup_Limit
+            latest = Get-GuiLastBackupInfo
+        }
+        config = [PSCustomObject]@{
+            proxyConfigured = [bool](Test-Path $ProxyConfigFile)
+            gitSyncConfigured = [bool](Test-Path $GitSyncConfigFile)
+            agreementShown = [bool](Test-Path $AgreementFile)
+        }
+    }
+}
+
+function Get-GuiAssistantConfig {
+    $gitConfig = Parse-ConfigFile $GitSyncConfigFile
+    $syncRules = Parse-ConfigFile $SyncRulesConfigFile
+    $labConfig = Parse-ConfigFile $LabConfigFile
+    $backupPrefs = if (Test-Path $BackupPrefsConfigFile) { @(Get-Content $BackupPrefsConfigFile) } else { @() }
+    $proxyPort = if (Test-Path $ProxyConfigFile) { [string](Get-Content $ProxyConfigFile -ErrorAction SilentlyContinue | Select-Object -First 1) } else { "" }
+
+    return [PSCustomObject]@{
+        proxy = [PSCustomObject]@{
+            configured = -not [string]::IsNullOrWhiteSpace($proxyPort)
+            port = $proxyPort
+        }
+        gitSync = [PSCustomObject]@{
+            configured = ($gitConfig.ContainsKey("REPO_URL") -and $gitConfig.ContainsKey("REPO_TOKEN"))
+            repoUrl = ConvertTo-GuiSafeText $gitConfig["REPO_URL"]
+            tokenSet = -not [string]::IsNullOrWhiteSpace($gitConfig["REPO_TOKEN"])
+        }
+        syncRules = $syncRules
+        lab = $labConfig
+        backupPrefs = $backupPrefs
+        tavernConfig = [PSCustomObject]@{
+            exists = [bool](Test-Path (Join-Path $ST_Dir "config.yaml"))
+            port = Get-STConfigValue "port"
+            listen = Get-STConfigValue "listen"
+            basicAuthMode = Get-STConfigValue "basicAuthMode"
+            enableUserAccounts = Get-STConfigValue "enableUserAccounts"
+            enableServerPlugins = Get-STConfigValue "enableServerPlugins"
+        }
+    }
+}
+
+function Start-GuiSillyTavern {
+    $startBatPath = Get-GuiStartBatPath
+    if ([string]::IsNullOrWhiteSpace($startBatPath)) {
+        throw "酒馆尚未安装或缺少 start.bat。"
+    }
+
+    $logs = New-Object System.Collections.Generic.List[string]
+    $labConfig = Parse-ConfigFile $LabConfigFile
+    if ($labConfig.ContainsKey("AUTO_START_GCLI") -and $labConfig["AUTO_START_GCLI"] -eq "true" -and (Test-Path $GcliDir)) {
+        try {
+            $null = Start-Gcli2ApiService *> $null
+            [void]$logs.Add("已尝试按实验室配置启动 gcli2api。")
+        } catch {
+            [void]$logs.Add("gcli2api 自动启动失败：$($_.Exception.Message)")
+        }
+    }
+
+    Push-Location $ST_Dir
+    try {
+        if (Get-Command "npm" -ErrorAction SilentlyContinue) {
+            $null = npm config set registry https://registry.npmmirror.com 2>$null
+        }
+        $logStamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
+        $stdoutLog = Join-Path $ConfigDir "tavern_stdout_$logStamp.log"
+        $stderrLog = Join-Path $ConfigDir "tavern_stderr_$logStamp.log"
+        $latestLogInfo = [PSCustomObject]@{
+            stdout = $stdoutLog
+            stderr = $stderrLog
+            createdAt = (Get-Date).ToString("o")
+        } | ConvertTo-Json -Compress
+        Write-FileUtf8NoBom -Path (Join-Path $ConfigDir "tavern_latest_logs.json") -Content $latestLogInfo
+
+        $launcherPath = Join-Path $ConfigDir "tavern_launcher.ps1"
+        $cmdLine = 'call "' + $startBatPath + '" 1> "' + $stdoutLog + '" 2> "' + $stderrLog + '"'
+        $launcherContent = @"
+`$ErrorActionPreference = 'Continue'
+`$OutputEncoding = [System.Text.Encoding]::UTF8
+Set-Location -LiteralPath $(ConvertTo-GuiPowerShellLiteral $ST_Dir)
+& cmd.exe /d /c $(ConvertTo-GuiPowerShellLiteral $cmdLine)
+"@
+        Write-FileUtf8NoBom -Path $launcherPath -Content $launcherContent
+
+        $powerShellExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh.exe" } else { "powershell.exe" }
+        $launcherArg = '"' + $launcherPath + '"'
+        $proc = Start-Process -FilePath $powerShellExecutable -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $launcherArg) -WorkingDirectory $ST_Dir -WindowStyle Hidden -PassThru
+        $proc.Id | Set-Content (Join-Path $ConfigDir "tavern.pid")
+        [void]$logs.Add("酒馆启动中，PID: $($proc.Id)")
+    } finally {
+        Pop-Location
+    }
+
+    return [PSCustomObject]@{
+        startBat = $startBatPath
+        workingDirectory = $ST_Dir
+        pid = $proc.Id
+        logs = @($logs)
+    }
+}
+
+function Get-GuiBackups {
+    if (-not (Test-Path $Backup_Root_Dir)) { return @() }
+    return @(Get-ChildItem -Path $Backup_Root_Dir -Filter "*.zip" -ErrorAction SilentlyContinue | Sort-Object CreationTime -Descending | ForEach-Object {
+        [PSCustomObject]@{
+            name = $_.Name
+            path = $_.FullName
+            sizeBytes = $_.Length
+            createdAt = $_.CreationTime.ToString("o")
+        }
+    })
+}
+
+function Invoke-GuiCommand {
+    param([string]$Command)
+    $null = Get-GuiPayload
+    Apply-Proxy
+
+    switch ($Command) {
+        "dashboard" {
+            return New-GuiResult -Ok $true -Code "OK" -Message "仪表盘数据读取成功。" -Data ([PSCustomObject]@{
+                status  = Get-GuiAssistantStatus
+                config  = Get-GuiAssistantConfig
+                backups = @(Get-GuiBackups)
+            })
+        }
+        "status" {
+            return New-GuiResult -Ok $true -Code "OK" -Message "状态读取成功。" -Data (Get-GuiAssistantStatus)
+        }
+        "start-tavern" {
+            $data = Start-GuiSillyTavern
+            return New-GuiResult -Ok $true -Code "OK" -Message "已发送酒馆启动命令。" -Data $data -Logs $data.logs
+        }
+        "stop-tavern" {
+            $port = if (Test-Path (Join-Path $ST_Dir "config.yaml")) { Get-STConfigValue "port" } else { "" }
+            if ([string]::IsNullOrWhiteSpace($port)) { $port = "8000" }
+            $conn = Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($conn) {
+                Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
+                return New-GuiResult -Ok $true -Code "OK" -Message "酒馆已停止。"
+            }
+            return New-GuiResult -Ok $true -Code "NOT_RUNNING" -Message "酒馆未在运行。"
+        }
+        "tavern-logs" {
+            $latestLogInfoPath = Join-Path $ConfigDir "tavern_latest_logs.json"
+            $stdoutLog = Join-Path $ConfigDir "tavern_stdout.log"
+            $stderrLog = Join-Path $ConfigDir "tavern_stderr.log"
+            if (Test-Path $latestLogInfoPath) {
+                try {
+                    $latestLogInfo = Get-Content $latestLogInfoPath -Raw | ConvertFrom-Json -ErrorAction Stop
+                    if (-not [string]::IsNullOrWhiteSpace($latestLogInfo.stdout)) { $stdoutLog = [string]$latestLogInfo.stdout }
+                    if (-not [string]::IsNullOrWhiteSpace($latestLogInfo.stderr)) { $stderrLog = [string]$latestLogInfo.stderr }
+                } catch {}
+            }
+            $stdout = if (Test-Path $stdoutLog) { @(Get-Content $stdoutLog -Tail 100) } else { @() }
+            $stderr = if (Test-Path $stderrLog) { @(Get-Content $stderrLog -Tail 50) } else { @() }
+            return New-GuiResult -Ok $true -Code "OK" -Message "日志读取成功。" -Data ([PSCustomObject]@{
+                stdout = $stdout
+                stderr = $stderr
+            })
+        }
+        "open-tavern-dir" {
+            if (-not (Test-Path $ST_Dir)) { throw "酒馆目录不存在，请先部署。" }
+            Invoke-Item $ST_Dir
+            return New-GuiResult -Ok $true -Code "OK" -Message "已打开酒馆目录。" -Data ([PSCustomObject]@{ path = $ST_Dir })
+        }
+        "list-backups" {
+            return New-GuiResult -Ok $true -Code "OK" -Message "备份列表读取成功。" -Data ([PSCustomObject]@{ backups = @(Get-GuiBackups); limit = $Backup_Limit })
+        }
+        "read-config" {
+            return New-GuiResult -Ok $true -Code "OK" -Message "配置读取成功。" -Data (Get-GuiAssistantConfig)
+        }
+        default {
+            return New-GuiResult -Ok $false -Code "UNKNOWN_COMMAND" -Message "未知 GUI 命令：$Command"
+        }
+    }
+}
+
 # --- 脚本执行入口 ---
 
 function Check-ForUpdatesOnStart {
@@ -3883,6 +4179,18 @@ function Check-ForUpdatesOnStart {
         Initialize-FirstPartySources
         Start-Job -ScriptBlock $jobScriptBlock -ArgumentList $ScriptSelfUpdateUrl, $UpdateFlagFile, $PSCommandPath | Out-Null
     } catch {}
+}
+
+if (-not [string]::IsNullOrWhiteSpace($GuiCommand)) {
+    try {
+        $result = Invoke-GuiCommand -Command $GuiCommand
+        Write-GuiJsonResult $result
+        if ($result.ok) { exit 0 }
+        exit 2
+    } catch {
+        Write-GuiJsonResult (New-GuiResult -Ok $false -Code "ERROR" -Message $_.Exception.Message)
+        exit 1
+    }
 }
 
 Apply-Proxy
